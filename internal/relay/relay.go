@@ -116,7 +116,7 @@ func (c *Client) sendViaSmartHost(ctx context.Context, from string, to []string,
 	if err != nil {
 		return fmt.Errorf("smtp handshake error: %w", err)
 	}
-	defer client.Quit()
+	defer func() { _ = client.Quit() }()
 
 	// Handle STARTTLS if not already direct TLS
 	if !isDirectTLS && c.cfg.TLSType != "NONE" {
@@ -262,7 +262,7 @@ func (c *Client) tryDeliverMX(ctx context.Context, mxHost string, domain string,
 	if err != nil {
 		return err
 	}
-	defer client.Quit()
+	defer func() { _ = client.Quit() }()
 
 	if ok, _ := client.Extension("STARTTLS"); ok {
 		_ = client.StartTLS(&tls.Config{ServerName: mxHost, InsecureSkipVerify: true})

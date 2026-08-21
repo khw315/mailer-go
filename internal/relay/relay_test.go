@@ -53,7 +53,7 @@ func TestRelaySendViaMockServer(t *testing.T) {
 		defer conn.Close()
 
 		// Simple SMTP conversation simulation
-		conn.Write([]byte("220 mock.smtp Service Ready\r\n"))
+		_, _ = conn.Write([]byte("220 mock.smtp Service Ready\r\n"))
 
 		buf := make([]byte, 1024)
 		for {
@@ -63,17 +63,17 @@ func TestRelaySendViaMockServer(t *testing.T) {
 			}
 			cmd := string(buf[:n])
 			if bytes.HasPrefix(buf[:n], []byte("EHLO")) || bytes.HasPrefix(buf[:n], []byte("HELO")) {
-				conn.Write([]byte("250-mock.smtp\r\n250 HELP\r\n"))
+				_, _ = conn.Write([]byte("250-mock.smtp\r\n250 HELP\r\n"))
 			} else if bytes.HasPrefix(buf[:n], []byte("MAIL FROM:")) {
-				conn.Write([]byte("250 2.1.0 Ok\r\n"))
+				_, _ = conn.Write([]byte("250 2.1.0 Ok\r\n"))
 			} else if bytes.HasPrefix(buf[:n], []byte("RCPT TO:")) {
-				conn.Write([]byte("250 2.1.5 Ok\r\n"))
+				_, _ = conn.Write([]byte("250 2.1.5 Ok\r\n"))
 			} else if bytes.HasPrefix(buf[:n], []byte("DATA")) {
-				conn.Write([]byte("354 End data with <CR><LF>.<CR><LF>\r\n"))
+				_, _ = conn.Write([]byte("354 End data with <CR><LF>.<CR><LF>\r\n"))
 			} else if bytes.Contains(buf[:n], []byte("\r\n.\r\n")) || cmd == ".\r\n" {
-				conn.Write([]byte("250 2.0.0 Ok: queued\r\n"))
+				_, _ = conn.Write([]byte("250 2.0.0 Ok: queued\r\n"))
 			} else if bytes.HasPrefix(buf[:n], []byte("QUIT")) {
-				conn.Write([]byte("221 2.0.0 Bye\r\n"))
+				_, _ = conn.Write([]byte("221 2.0.0 Bye\r\n"))
 				return
 			}
 		}
