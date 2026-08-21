@@ -21,6 +21,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # Production Minimal Stage
 FROM alpine:3.20
 
+LABEL org.opencontainers.image.source="https://github.com/khw315/mailer-go"
+LABEL org.opencontainers.image.description="Lightweight, high-performance SMTP Smart-Host Relay and Direct Mailer written in Go"
+
 RUN apk add --no-cache ca-certificates tzdata curl && \
     addgroup -g 10001 -S appgroup && \
     adduser -u 10001 -S appuser -G appgroup && \
