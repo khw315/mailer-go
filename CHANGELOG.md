@@ -7,14 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.0.0] - 2026-08-21
+## [1.0.1] - 2026-08-21
 
 ### Features
 
-- **High-Performance SMTP Inbound Server**: RFC-compliant SMTP server built on Go, handling inbound mail traffic across configurable ports (`:2525`, `:25`, `:587`).
+- **High-Performance SMTP Inbound Server**: RFC-compliant SMTP server built in pure Go, handling inbound mail traffic across configurable ports (`:2525`, `:25`, `:587`).
 - **Smart-Host Outbound Relay**: Seamless forwarding to external providers including Google Workspace / Gmail, SendGrid, Amazon SES, Mailgun, and Microsoft Office 365.
 - **Direct MX Delivery Mode**: Automatic DNS MX resolution and direct delivery to recipient domains when `RELAY_HOST` is left empty.
-- **Dual SASL Authentication**: Native SASL `PLAIN` and `LOGIN` authentication mechanisms for both incoming connections and upstream relay servers.
+- **Dual SASL Authentication**: Native SASL `PLAIN` and `LOGIN` authentication mechanisms for incoming connections and upstream relay servers.
 - **Header Injection Filter**: Automatic injection of tracking and routing headers such as `X-Relayed-By`.
 
 ### Security
@@ -38,8 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **JSON Statistics API**: Real-time server statistics and uptime reporting via `/api/stats`.
 - **Structured Logging**: Zero-dependency structured logging (`log/slog`) supporting both `text` and `json` formats.
 
-### Deployment
+### Deployment & CI
 
-- **Ultra-Lightweight Multi-Stage Dockerfile**: Alpine-based final image with a total size of under 15MB.
-- **Docker Compose Template**: Out-of-the-box `docker-compose.yml` configuration.
+- **OCI Package Linking**: Added `org.opencontainers.image.source` metadata label linking published GitHub Container Registry images directly to the repository.
+- **Targeted GHCR Automated Build**: Multi-arch CI pipeline for `linux/amd64` and `linux/arm64` container builds.
+- **Ultra-Lightweight Multi-Stage Dockerfile**: Alpine-based final image with a total size under 15MB.
 - **Comprehensive Environment Specification**: Complete `.env.example` reference with 12-factor app configuration parameters.
