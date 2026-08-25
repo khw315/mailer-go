@@ -15,17 +15,19 @@ import (
 	"github.com/khw315/mailer-go/internal/config"
 	"github.com/khw315/mailer-go/internal/metrics"
 	"github.com/khw315/mailer-go/internal/queue"
+	"github.com/khw315/mailer-go/internal/ratelimit"
 	"github.com/khw315/mailer-go/internal/relay"
 )
 
 // Server is the inbound SMTP server.
 type Server struct {
-	cfg        *config.Config
-	smtpServer *smtp.Server
-	queue      *queue.Queue
-	relay      relay.Relayer
-	metrics    *metrics.Metrics
-	logger     *slog.Logger
+	cfg         *config.Config
+	smtpServer  *smtp.Server
+	queue       *queue.Queue
+	relay       relay.Relayer
+	metrics     *metrics.Metrics
+	rateLimiter *ratelimit.Limiter
+	logger      *slog.Logger
 }
 
 // New creates a new SMTP inbound Server.
@@ -37,12 +39,15 @@ func New(cfg *config.Config, q *queue.Queue, r relay.Relayer, m *metrics.Metrics
 		m = metrics.Default
 	}
 
+	limiter := ratelimit.New(cfg.RateLimit.Enabled, cfg.RateLimit.MaxPerMinute, cfg.RateLimit.Burst)
+
 	s := &Server{
-		cfg:     cfg,
-		queue:   q,
-		relay:   r,
-		metrics: m,
-		logger:  logger,
+		cfg:         cfg,
+		queue:       q,
+		relay:       r,
+		metrics:     m,
+		rateLimiter: limiter,
+		logger:      logger,
 	}
 
 	backend := &Backend{
@@ -79,6 +84,8 @@ func (s *Server) Start() error {
 		"listen_addr", s.cfg.Server.ListenAddr,
 		"hostname", s.cfg.Server.Hostname,
 		"max_message_size", s.cfg.Server.MaxMessageSize,
+		"require_tls", s.cfg.Server.RequireTLS,
+		"rate_limit_enabled", s.cfg.RateLimit.Enabled,
 	)
 	return s.smtpServer.ListenAndServe()
 }
@@ -174,6 +181,27 @@ func (s *Session) Auth(mech string) (sasl.Server, error) {
 
 // Mail handles MAIL FROM command.
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
+	// Check TLS requirement
+	_, isTLS := s.conn.TLSConnectionState()
+	if s.server.cfg.Server.RequireTLS && !isTLS {
+		s.server.logger.Warn("rejecting unencrypted session when RequireTLS is enabled", "ip", s.remoteIP.String())
+		return &smtp.SMTPError{
+			Code:         530,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 0},
+			Message:      "Must issue a STARTTLS command first",
+		}
+	}
+
+	// Check Rate Limiter
+	if s.server.rateLimiter != nil && !s.server.rateLimiter.AllowIP(s.remoteIP) {
+		s.server.logger.Warn("rate limit exceeded for client IP", "ip", s.remoteIP.String())
+		return &smtp.SMTPError{
+			Code:         421,
+			EnhancedCode: smtp.EnhancedCode{4, 7, 0},
+			Message:      "Too many requests - rate limit exceeded, please try again later",
+		}
+	}
+
 	// Verify relay permissions (either allowed by IP whitelist or authenticated)
 	if !s.isAllowedByNet && !s.isAuthenticated {
 		s.server.logger.Warn("relay access denied for unauthenticated client not in allowed networks",

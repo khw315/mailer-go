@@ -14,11 +14,17 @@ Designed as a drop-in, zero-overhead replacement for containerized **Postfix** r
 ## Highlights
 
 - **Postfix-Compatible Security (`mynetworks`)**: Native CIDR IP subnet whitelisting (`ALLOWED_NETWORKS`) allowing internal microservices and Docker containers to relay emails without credentials.
-- **SASL Authentication**: Built-in `PLAIN` and `LOGIN` SASL support for external authenticated clients and enterprise upstream relays.
-- **Dual Delivery Modes**:
+- **SASL Authentication**: Built-in `PLAIN` and `LOGIN` SASL support for external authenticated clients and upstream smart-host relays.
+- **Dual Delivery Modes & Multi-Relay**:
   - **Smart-Host Outbound Relay**: Forward emails to upstream providers (Gmail, SendGrid, Amazon SES, Mailgun, Office 365, etc.) via opportunistic STARTTLS (port 587/25) or direct TLS/SMTPS (port 465).
-  - **Direct MX Delivery**: Automatic DNS MX resolution and direct opportunistic TLS delivery if `RELAY_HOST` is omitted.
-- **Resilient Spooling & Retry Queue**: In-memory worker pool with optional persistent disk spooling and exponential backoff retry for network resilience.
+  - **Multi-Upstream Failover & Round-Robin**: Automatic fallback across multiple upstream relays (`RELAY_UPSTREAMS`).
+  - **Domain-Based Routing**: Route specific recipient domains (`RELAY_DOMAIN_ROUTES`) to dedicated upstreams.
+  - **Direct MX Delivery**: Automatic DNS MX resolution and direct opportunistic TLS delivery if upstream relay is omitted.
+- **HTTP REST Mail Submission API**: Submit emails via JSON payloads (`POST /v1/send`) with attachments, HTML/plain text, and custom headers.
+- **Embedded Web Management Dashboard**: Built-in web UI at `/dashboard` to inspect active queues, view Dead Letter Queue (DLQ), retry failed emails, flush queues, and send test emails.
+- **Dead Letter Queue (DLQ) & Spool Management**: Isolated storage for permanently failed emails with REST API endpoints for inspection and manual retry.
+- **Rate Limiting & Inbound TLS Enforcement**: Token-bucket rate limiter per IP (`RATE_LIMIT_ENABLED`) and mandatory STARTTLS enforcement (`SERVER_REQUIRE_TLS`).
+- **Asynchronous Delivery Webhooks**: Instant HTTP callbacks (`delivered`, `failed`, `dlq`, `queued`) with HMAC SHA-256 signatures.
 - **Built-in Observability**: Native HTTP server providing `/healthz`, `/readyz`, JSON `/api/stats`, and Prometheus metrics at `/metrics`.
 - **Minimal Footprint**: Multi-stage container build yielding a `< 15MB` image and `< 15MB RAM` runtime consumption running as an unprivileged user (`appuser`).
 
@@ -39,7 +45,7 @@ services:
     restart: unless-stopped
     ports:
       - "25:2525"      # Map host SMTP port 25 to container 2525
-      - "8080:8080"    # Health & Prometheus metrics port
+      - "8080:8080"    # Health, REST API & Web Dashboard port
     environment:
       - SERVER_LISTEN_ADDR=:2525
       - SERVER_HOSTNAME=mailer.local
@@ -51,9 +57,10 @@ services:
       - RELAY_PASSWORD=your-app-password
       - RELAY_AUTH_TYPE=AUTO
       - RELAY_TLS_TYPE=AUTO
-      # Spooling & Queue
+      # Spooling, DLQ & Queue
       - QUEUE_ENABLED=true
       - QUEUE_SPOOL_DIR=/var/spool/mailer-go
+      - HTTP_DASHBOARD_ENABLED=true
       - LOG_LEVEL=info
     volumes:
       - mailer-spool:/var/spool/mailer-go
@@ -67,26 +74,94 @@ Start the service:
 docker compose up -d
 ```
 
-> [!TIP]
-> When running inside a shared Docker network, other service containers can simply use `mailer-go:2525` (or `mailer-go:25`) as their SMTP host without any username or password.
+Open Web Dashboard in browser:
+```
+http://localhost:8080/dashboard
+```
 
 ---
 
-### Running Standalone Binary
+## HTTP REST Mail Submission API (`/v1/send`)
+
+Submit emails directly over HTTP without needing an SMTP client library:
 
 ```bash
-# Clone the repository
-git clone https://github.com/khw315/mailer-go.git
-cd mailer-go
+curl -X POST http://localhost:8080/v1/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "notifications@example.com",
+    "to": ["user@example.com"],
+    "cc": ["team@example.com"],
+    "subject": "Order Confirmation #1042",
+    "text": "Thank you for your order! Your confirmation number is #1042.",
+    "html": "<h1>Thank you for your order!</h1><p>Your confirmation number is <strong>#1042</strong>.</p>",
+    "headers": {
+      "X-Priority": "1"
+    }
+  }'
+```
 
-# Copy environment template
-cp .env.example .env
+### Response
+```json
+{
+  "status": "queued",
+  "id": "a1b2c3d4e5f6789012345678",
+  "recipients": ["user@example.com", "team@example.com"]
+}
+```
 
-# Run automated tests
-go test ./...
+---
 
-# Start mailer-go
-go run ./cmd/mailer-go
+## Queue & Dead Letter Queue (DLQ) Management API
+
+- **List Active & DLQ Messages**:
+  `GET /api/queue`
+- **Retry Failed Message from DLQ**:
+  `POST /api/queue/retry` with payload `{"id": "a1b2c3d4e5f6789012345678"}`
+- **Flush Active Queue Immediately**:
+  `POST /api/queue/flush`
+- **Delete Queued Message**:
+  `DELETE /api/queue/{id}`
+
+---
+
+## Multi-Relay Failover & Domain-Based Routing
+
+### Multi-Upstream Failover & Round-Robin
+```env
+RELAY_STRATEGY=failover # or round-robin
+RELAY_UPSTREAMS=smtp://user1:pass1@smtp.primary-provider.com:587,smtps://user2:pass2@smtp.backup-provider.com:465
+```
+
+### Domain-Based Routing
+Direct emails intended for internal domains or specific partners to dedicated gateways:
+```env
+RELAY_DOMAIN_ROUTES=corp.internal=10.0.0.50:25,partner.com=smtp.partner-relay.net:587
+```
+
+---
+
+## Webhook Notifications
+
+Enable event callbacks for email lifecycle events (`queued`, `delivered`, `failed`, `dlq`, `retry`):
+
+```env
+WEBHOOK_ENABLED=true
+WEBHOOK_URL=https://my-app.internal/api/email-events
+WEBHOOK_SECRET=my_webhook_secret_key
+```
+
+Payload delivered to webhook:
+```json
+{
+  "event": "delivered",
+  "message_id": "a1b2c3d4e5f6789012345678",
+  "from": "notifications@example.com",
+  "to": ["user@example.com"],
+  "subject": "Order Confirmation #1042",
+  "attempts": 1,
+  "timestamp": "2026-08-25T09:00:00Z"
+}
 ```
 
 ---
@@ -107,48 +182,33 @@ go run ./cmd/mailer-go
 | `SMTP_USER_PASS` | `INBOUND_USERS` | `""` | Client auth list in format `user1:pass1,user2:pass2` |
 | `SMTP_PORT` | `SERVER_LISTEN_ADDR` | `:2525` | Inbound SMTP listening address |
 
----
+### Extended Features
 
-## Provider Configuration Examples
-
-### Gmail
-```env
-RELAY_HOST=smtp.gmail.com
-RELAY_PORT=587
-RELAY_USER=youraccount@gmail.com
-RELAY_PASSWORD=xxxx-xxxx-xxxx-xxxx # Google 16-digit App Password
-RELAY_TLS_TYPE=STARTTLS
-```
-
-### SendGrid
-```env
-RELAY_HOST=smtp.sendgrid.net
-RELAY_PORT=587
-RELAY_USER=apikey
-RELAY_PASSWORD=SG.your_api_key_here
-RELAY_TLS_TYPE=STARTTLS
-```
-
-### Amazon SES
-```env
-RELAY_HOST=email-smtp.us-east-1.amazonaws.com
-RELAY_PORT=587
-RELAY_USER=YOUR_SES_SMTP_USERNAME
-RELAY_PASSWORD=YOUR_SES_SMTP_PASSWORD
-RELAY_TLS_TYPE=STARTTLS
-```
-
-### Direct MX Delivery (No Smart-Host)
-Leave `RELAY_HOST` empty to enable direct DNS MX delivery:
-```env
-RELAY_HOST=
-```
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `RATE_LIMIT_ENABLED` | `false` | Enable Token Bucket Rate Limiting per IP |
+| `RATE_LIMIT_MAX_PER_MINUTE` | `120` | Maximum requests per minute per IP |
+| `RATE_LIMIT_BURST` | `30` | Max burst capacity for rate limiter |
+| `SERVER_REQUIRE_TLS` | `false` | Enforce STARTTLS for all inbound connections |
+| `HTTP_API_KEY` | `""` | Optional API Key protecting REST & Queue endpoints |
+| `HTTP_DASHBOARD_ENABLED`| `true` | Enable web dashboard at `/dashboard` |
+| `WEBHOOK_ENABLED` | `false` | Enable delivery status webhooks |
+| `WEBHOOK_URL` | `""` | Webhook HTTP POST destination endpoint |
+| `WEBHOOK_SECRET` | `""` | Optional HMAC SHA-256 signature secret |
+| `RELAY_STRATEGY` | `failover` | Strategy for multiple relays (`failover`, `round-robin`) |
+| `RELAY_UPSTREAMS` | `""` | List of upstream relays in URL format or JSON |
+| `RELAY_DOMAIN_ROUTES` | `""` | Map of domain routes (e.g. `domain.com=host:port`) |
 
 ---
 
 ## Testing & Verification
 
-### Test via Python
+### Running Automated Tests
+```bash
+go test -v ./...
+```
+
+### Test via Python SMTP
 ```python
 import smtplib
 from email.mime.text import MIMEText
@@ -163,128 +223,12 @@ with smtplib.SMTP("127.0.0.1", 2525) as server:
     print("Email successfully accepted by relay!")
 ```
 
-### Test via CLI (`swaks`)
-```bash
-swaks --to recipient@example.com --from app@internal.local --server 127.0.0.1:2525
-```
-
 ---
 
 ## Monitoring & Health Checks
 
+- **Web Dashboard**: `GET http://localhost:8080/dashboard`
 - **Liveness & Readiness**:
   - `GET http://localhost:8080/healthz` -> `{"status":"healthy","uptime":"1h24m10s"}`
   - `GET http://localhost:8080/readyz` -> `ok`
-- **Prometheus Metrics**:
-  - `GET http://localhost:8080/metrics`
-    ```promql
-    # HELP mailer_uptime_seconds Total time the server has been running in seconds.
-    # TYPE mailer_uptime_seconds gauge
-    mailer_uptime_seconds 5040.25
-
-    # HELP mailer_emails_received_total Total number of emails received from inbound clients.
-    # TYPE mailer_emails_received_total counter
-    mailer_emails_received_total 128
-
-    # HELP mailer_emails_relayed_total Total number of emails successfully relayed to upstream.
-    # TYPE mailer_emails_relayed_total counter
-    mailer_emails_relayed_total 128
-
-    # HELP mailer_queue_length Current number of messages waiting in spool queue.
-    # TYPE mailer_queue_length gauge
-    mailer_queue_length 0
-    ```
-
----
-
-## Architecture Diagram
-
-```mermaid
-flowchart TD
-    subgraph Ingress [" Inbound Clients "]
-        AppA["Docker App / Service"]
-        AppB["Internal Microservice"]
-        ExtClient["External Client (Auth)"]
-    end
-
-    subgraph MailerGo [" mailer-go Daemon "]
-        direction TB
-        
-        subgraph InboundLayer [" Inbound SMTP Engine (:2525) "]
-            Listener["SMTP Server Listener"]
-            NetCheck{"CIDR Allowed\n(MYNETWORKS)?"}
-            AuthCheck{"SASL Auth\n(PLAIN / LOGIN)?"}
-            Reject["554 Relay Access Denied"]
-            Accept["Session Accepted (DATA)"]
-        end
-
-        subgraph QueueLayer [" Spool & Retry Engine "]
-            SpoolQueue["Delivery Queue Channel"]
-            DiskSpool[("Disk Spool /var/spool")]
-            RetryWorker["Retry Worker Pool (Exponential Backoff)"]
-        end
-
-        subgraph OutboundLayer [" Relay & Delivery Engine "]
-            HeaderInjection["Header Filter (X-Relayed-By)"]
-            Router{"RELAY_HOST\nConfigured?"}
-            SmartHost["Smart-Host Client\n(STARTTLS / SMTPS)"]
-            DirectMX["DNS MX Lookup\n& Direct Delivery"]
-        end
-
-        subgraph ObservabilityLayer [" Observability & HTTP (:8080) "]
-            HealthEndpoint["/healthz & /readyz"]
-            MetricsExporter["Prometheus /metrics"]
-            StatsAPI["JSON /api/stats"]
-        end
-    end
-
-    subgraph Egress [" Destinations "]
-        UpstreamRelay["Upstream Provider\n(Gmail, SendGrid, SES, Mailgun)"]
-        TargetMX["Recipient MX Server"]
-    end
-
-    %% Ingress Connections
-    AppA -->|SMTP Port 25/2525| Listener
-    AppB -->|SMTP Port 25/2525| Listener
-    ExtClient -->|SMTP + Auth| Listener
-
-    %% Inbound Processing
-    Listener --> NetCheck
-    NetCheck -- Yes --> Accept
-    NetCheck -- No --> AuthCheck
-    AuthCheck -- Valid --> Accept
-    AuthCheck -- Invalid --> Reject
-
-    %% Queue Processing
-    Accept --> SpoolQueue
-    SpoolQueue <--> DiskSpool
-    SpoolQueue --> RetryWorker
-
-    %% Outbound Processing
-    RetryWorker --> HeaderInjection
-    HeaderInjection --> Router
-    Router -- Yes --> SmartHost
-    Router -- No --> DirectMX
-
-    %% Egress Connections
-    SmartHost -->|STARTTLS / Port 587| UpstreamRelay
-    DirectMX -->|DNS MX / Port 25| TargetMX
-
-    %% Observability Connections
-    Accept -.-> MetricsExporter
-    RetryWorker -.-> MetricsExporter
-    SmartHost -.-> MetricsExporter
-    DirectMX -.-> MetricsExporter
-
-    classDef ingressStyle fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b;
-    classDef serverStyle fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
-    classDef queueStyle fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#e65100;
-    classDef egressStyle fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#1b5e20;
-    classDef rejectStyle fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#b71c1c;
-
-    class AppA,AppB,ExtClient ingressStyle;
-    class Listener,Accept,HeaderInjection,Router serverStyle;
-    class SpoolQueue,DiskSpool,RetryWorker queueStyle;
-    class SmartHost,DirectMX,UpstreamRelay,TargetMX egressStyle;
-    class Reject rejectStyle;
-```
+- **Prometheus Metrics**: `GET http://localhost:8080/metrics`

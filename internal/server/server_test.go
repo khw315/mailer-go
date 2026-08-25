@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/smtp"
 	"testing"
@@ -13,12 +15,16 @@ import (
 )
 
 type mockRelayer struct {
-	lastFrom string
-	lastTo   []string
-	lastMsg  []byte
+	lastFrom  string
+	lastTo    []string
+	lastMsg   []byte
+	shouldErr bool
 }
 
 func (m *mockRelayer) Send(ctx context.Context, from string, to []string, msg []byte) error {
+	if m.shouldErr {
+		return errors.New("upstream relay failed")
+	}
 	m.lastFrom = from
 	m.lastTo = to
 	m.lastMsg = msg
@@ -175,3 +181,284 @@ func TestServerInvalidAuth(t *testing.T) {
 		t.Errorf("expected Auth with wrong password to fail, but succeeded")
 	}
 }
+
+func TestServerRateLimiting(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.ListenAddr = "127.0.0.1:0"
+	cfg.Server.AllowedNetworks = []string{"127.0.0.0/8"}
+	cfg.RateLimit.Enabled = true
+	cfg.RateLimit.MaxPerMinute = 60
+	cfg.RateLimit.Burst = 1
+	_ = cfg.Compile()
+
+	mockRelay := &mockRelayer{}
+	m := metrics.New()
+	q := queue.New(&cfg.Queue, mockRelay, m, nil)
+	_ = q.Start(context.Background())
+	defer q.Stop()
+
+	srv, err := New(cfg, q, mockRelay, m, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+	defer srv.Close()
+
+	go func() { _ = srv.Serve(listener) }()
+	addr := listener.Addr().String()
+
+	// 1st request should be allowed (uses the 1 burst token)
+	c1, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	if err := c1.Mail("test1@local"); err != nil {
+		t.Fatalf("1st mail failed: %v", err)
+	}
+	_ = c1.Quit()
+
+	// 2nd immediate request should be rejected by rate limiter
+	c2, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer c2.Close()
+
+	err = c2.Mail("test2@local")
+	if err == nil {
+		t.Errorf("expected 2nd immediate Mail to be rejected by rate limiter")
+	}
+}
+
+func TestServerRequireTLS(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.ListenAddr = "127.0.0.1:0"
+	cfg.Server.AllowedNetworks = []string{"127.0.0.0/8"}
+	cfg.Server.RequireTLS = true
+	_ = cfg.Compile()
+
+	mockRelay := &mockRelayer{}
+	m := metrics.New()
+	srv, err := New(cfg, nil, mockRelay, m, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+	defer srv.Close()
+
+	go func() { _ = srv.Serve(listener) }()
+	addr := listener.Addr().String()
+
+	client, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer client.Close()
+
+	// MAIL FROM without STARTTLS should fail
+	err = client.Mail("unencrypted@local")
+	if err == nil {
+		t.Errorf("expected Mail without TLS to be rejected when RequireTLS is enabled")
+	}
+}
+
+func TestServerLimitsAndDirectDelivery(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.ListenAddr = "127.0.0.1:0"
+	cfg.Server.AllowedNetworks = []string{"127.0.0.0/8"}
+	cfg.Server.MaxRecipients = 1
+	cfg.Server.MaxMessageSize = 50 // 50 bytes limit
+	_ = cfg.Compile()
+
+	mockRelay := &mockRelayer{}
+	m := metrics.New()
+	// Direct delivery (queue == nil)
+	srv, err := New(cfg, nil, mockRelay, m, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+	defer srv.Close()
+
+	go func() { _ = srv.Serve(listener) }()
+	addr := listener.Addr().String()
+
+	client, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer client.Close()
+
+	_ = client.Mail("sender@local")
+	_ = client.Rcpt("rcpt1@local")
+
+	// 2nd recipient should exceed MaxRecipients=1
+	err = client.Rcpt("rcpt2@local")
+	if err == nil {
+		t.Errorf("expected 2nd recipient to exceed MaxRecipients limit")
+	}
+
+	// Send message that exceeds MaxMessageSize
+	w, err := client.Data()
+	if err != nil {
+		t.Fatalf("data command failed: %v", err)
+	}
+	oversizeData := bytes.Repeat([]byte("A"), 100)
+	_, _ = w.Write(oversizeData)
+	err = w.Close()
+	if err == nil {
+		t.Errorf("expected oversized message to be rejected by server")
+	}
+
+	// Reset session
+	_ = client.Reset()
+}
+
+func TestExtractIP(t *testing.T) {
+	// TCPAddr IPv4
+	tcpAddr := &net.TCPAddr{IP: net.ParseIP("192.168.1.50"), Port: 54321}
+	ip := extractIP(tcpAddr)
+	if ip == nil || ip.String() != "192.168.1.50" {
+		t.Errorf("expected 192.168.1.50, got %v", ip)
+	}
+
+	// TCPAddr IPv6
+	tcpAddr6 := &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 1234}
+	ip = extractIP(tcpAddr6)
+	if ip == nil || ip.String() != "2001:db8::1" {
+		t.Errorf("expected 2001:db8::1, got %v", ip)
+	}
+
+	// nil addr
+	if extractIP(nil) != nil {
+		t.Errorf("expected nil for nil addr")
+	}
+}
+
+func TestLoginServerAuth(t *testing.T) {
+	loginSrv := NewLoginServer(func(username, password string) error {
+		if username == "testuser" && password == "testpass" {
+			return nil
+		}
+		return errors.New("invalid credentials")
+	})
+
+	// Challenge for Username
+	challenge, done, err := loginSrv.Next(nil)
+	if err != nil || string(challenge) != "Username:" || done {
+		t.Errorf("expected Username: challenge, got challenge=%s, err=%v", challenge, err)
+	}
+
+	// Send Username -> Challenge for Password
+	challenge, done, err = loginSrv.Next([]byte("testuser"))
+	if err != nil || string(challenge) != "Password:" || done {
+		t.Errorf("expected Password: challenge, got challenge=%s, err=%v", challenge, err)
+	}
+
+	// Send valid Password -> Done
+	challenge, done, err = loginSrv.Next([]byte("testpass"))
+	if err != nil || !done || challenge != nil {
+		t.Errorf("expected success auth, got err=%v, done=%v", err, done)
+	}
+
+	// Test invalid credentials
+	loginSrvBad := NewLoginServer(func(username, password string) error {
+		return errors.New("auth failed")
+	})
+	_, _, _ = loginSrvBad.Next(nil)
+	_, _, _ = loginSrvBad.Next([]byte("baduser"))
+	_, done, err = loginSrvBad.Next([]byte("badpass"))
+	if err == nil || !done {
+		t.Errorf("expected error on invalid login credentials")
+	}
+}
+
+func TestServerStartLifecycle(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.ListenAddr = "127.0.0.1:0"
+	_ = cfg.Compile()
+
+	srv, err := New(cfg, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	go func() {
+		_ = srv.Start()
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if err := srv.Close(); err != nil {
+		t.Errorf("srv.Close failed: %v", err)
+	}
+}
+
+func TestServerDirectRelaySuccessAndFailure(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.ListenAddr = "127.0.0.1:0"
+	cfg.Server.AllowedNetworks = []string{"127.0.0.0/8"}
+	_ = cfg.Compile()
+
+	mockRelay := &mockRelayer{}
+	m := metrics.New()
+	srv, err := New(cfg, nil, mockRelay, m, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+	defer srv.Close()
+
+	go func() { _ = srv.Serve(listener) }()
+	addr := listener.Addr().String()
+
+	// 1. Success direct send
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	_ = c.Mail("direct@local")
+	_ = c.Rcpt("target@local")
+	w, _ := c.Data()
+	_, _ = w.Write([]byte("Subject: Direct\r\n\r\nDirect message"))
+	_ = w.Close()
+	_ = c.Quit()
+
+	// 2. Failure direct send
+	mockRelay.shouldErr = true
+	c2, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer c2.Close()
+	_ = c2.Mail("fail@local")
+	_ = c2.Rcpt("target@local")
+	w2, _ := c2.Data()
+	_, _ = w2.Write([]byte("Subject: Fail\r\n\r\nFail message"))
+	err = w2.Close()
+	if err == nil {
+		t.Errorf("expected error on data close when relay fails")
+	}
+}
+
+

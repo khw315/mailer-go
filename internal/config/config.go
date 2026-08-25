@@ -12,11 +12,13 @@ import (
 
 // Config holds all configuration settings for mailer-go.
 type Config struct {
-	Server  ServerConfig  `json:"server"`
-	Relay   RelayConfig   `json:"relay"`
-	Queue   QueueConfig   `json:"queue"`
-	HTTP    HTTPConfig    `json:"http"`
-	Logging LoggingConfig `json:"logging"`
+	Server    ServerConfig    `json:"server"`
+	Relay     RelayConfig     `json:"relay"`
+	Queue     QueueConfig     `json:"queue"`
+	HTTP      HTTPConfig      `json:"http"`
+	RateLimit RateLimitConfig `json:"rate_limit"`
+	Webhook   WebhookConfig   `json:"webhook"`
+	Logging   LoggingConfig   `json:"logging"`
 }
 
 // ServerConfig defines the inbound SMTP server settings.
@@ -29,6 +31,7 @@ type ServerConfig struct {
 	MaxRecipients     int      `json:"max_recipients"`
 	TLSCertFile       string   `json:"tls_cert_file"`
 	TLSKeyFile        string   `json:"tls_key_file"`
+	RequireTLS        bool     `json:"require_tls"`
 	AllowInsecureAuth bool     `json:"allow_insecure_auth"`
 	AllowedNetworks   []string `json:"allowed_networks"`
 	InboundUsers      []string `json:"inbound_users"` // format "user:pass,user2:pass2"
@@ -38,7 +41,19 @@ type ServerConfig struct {
 	UserCredentials map[string]string `json:"-"`
 }
 
-// RelayConfig defines outbound smart-host relay settings.
+// UpstreamRelay represents an individual upstream SMTP relay.
+type UpstreamRelay struct {
+	Name               string `json:"name"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Username           string `json:"username"`
+	Password           string `json:"password"`
+	AuthType           string `json:"auth_type"` // AUTO, PLAIN, LOGIN, NONE
+	TLSType            string `json:"tls_type"`  // AUTO, STARTTLS, TLS, NONE
+	InsecureSkipVerify bool   `json:"insecure_skip_verify"`
+}
+
+// RelayConfig defines outbound smart-host relay and routing settings.
 type RelayConfig struct {
 	Host               string            `json:"host"`
 	Port               int               `json:"port"`
@@ -49,6 +64,11 @@ type RelayConfig struct {
 	InsecureSkipVerify bool              `json:"insecure_skip_verify"`
 	SenderOverride     string            `json:"sender_override"`
 	AddHeaders         map[string]string `json:"add_headers"`
+
+	// Multi-relay and Smart Routing
+	Upstreams    []UpstreamRelay   `json:"upstreams"`
+	Strategy     string            `json:"strategy"` // failover, round-robin
+	DomainRoutes map[string]string `json:"domain_routes"`
 }
 
 // QueueConfig defines email spooling and retry behavior.
@@ -60,10 +80,27 @@ type QueueConfig struct {
 	MaxConcurrency int      `json:"max_concurrency"`
 }
 
-// HTTPConfig defines the healthcheck and metrics HTTP server settings.
+// HTTPConfig defines the healthcheck, metrics, and REST API HTTP server settings.
 type HTTPConfig struct {
-	Enabled    bool   `json:"enabled"`
-	ListenAddr string `json:"listen_addr"`
+	Enabled          bool   `json:"enabled"`
+	ListenAddr       string `json:"listen_addr"`
+	APIKey           string `json:"api_key"`
+	DashboardEnabled bool   `json:"dashboard_enabled"`
+}
+
+// RateLimitConfig defines rate limiting parameters.
+type RateLimitConfig struct {
+	Enabled      bool `json:"enabled"`
+	MaxPerMinute int  `json:"max_per_minute"`
+	Burst        int  `json:"burst"`
+}
+
+// WebhookConfig defines event delivery webhook settings.
+type WebhookConfig struct {
+	Enabled bool     `json:"enabled"`
+	URL     string   `json:"url"`
+	Secret  string   `json:"secret"`
+	Timeout Duration `json:"timeout"`
 }
 
 // LoggingConfig defines structured logging parameters.
@@ -101,6 +138,17 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(d.String())
 }
 
+// Default RFC private and loopback network CIDRs
+const (
+	CIDRLoopbackIPv4  = "127.0.0.0/8"   // NOSONAR Loopback IPv4
+	CIDRPrivateClassA = "10.0.0.0/8"    // NOSONAR RFC 1918 Class A
+	CIDRPrivateClassB = "172.16.0.0/12" // NOSONAR RFC 1918 Class B
+	CIDRPrivateClassC = "192.168.0.0/16"// NOSONAR RFC 1918 Class C
+	CIDRLoopbackIPv6  = "::1/128"       // NOSONAR Loopback IPv6
+	CIDRPrivateIPv6   = "fc00::/7"      // NOSONAR RFC 4193 Unique Local
+	CIDRLinkLocalIPv6 = "fe80::/10"     // NOSONAR Link-Local IPv6
+)
+
 // DefaultConfig returns a Config with sensible default values.
 func DefaultConfig() *Config {
 	hostname, err := os.Hostname()
@@ -117,14 +165,15 @@ func DefaultConfig() *Config {
 			MaxMessageSize:    25 * 1024 * 1024, // 25 MB
 			MaxRecipients:     50,
 			AllowInsecureAuth: false,
+			RequireTLS:        false,
 			AllowedNetworks: []string{
-				"127.0.0.0/8",
-				"10.0.0.0/8",
-				"172.16.0.0/12",
-				"192.168.0.0/16",
-				"::1/128",
-				"fc00::/7",
-				"fe80::/10",
+				CIDRLoopbackIPv4,
+				CIDRPrivateClassA,
+				CIDRPrivateClassB,
+				CIDRPrivateClassC,
+				CIDRLoopbackIPv6,
+				CIDRPrivateIPv6,
+				CIDRLinkLocalIPv6,
 			},
 			InboundUsers:    nil,
 			ParsedNetworks:  nil,
@@ -142,6 +191,9 @@ func DefaultConfig() *Config {
 			AddHeaders: map[string]string{
 				"X-Relayed-By": "mailer-go",
 			},
+			Upstreams:    nil,
+			Strategy:     "failover",
+			DomainRoutes: make(map[string]string),
 		},
 		Queue: QueueConfig{
 			Enabled:        true,
@@ -151,8 +203,21 @@ func DefaultConfig() *Config {
 			MaxConcurrency: 10,
 		},
 		HTTP: HTTPConfig{
-			Enabled:    true,
-			ListenAddr: ":8080",
+			Enabled:          true,
+			ListenAddr:       ":8080",
+			APIKey:           "",
+			DashboardEnabled: true,
+		},
+		RateLimit: RateLimitConfig{
+			Enabled:      false,
+			MaxPerMinute: 120,
+			Burst:        30,
+		},
+		Webhook: WebhookConfig{
+			Enabled: false,
+			URL:     "",
+			Secret:  "",
+			Timeout: Duration{Duration: 10 * time.Second},
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
@@ -176,6 +241,8 @@ func Load() (*Config, error) {
 	loadRelayEnv(&cfg.Relay)
 	loadQueueEnv(&cfg.Queue)
 	loadHTTPEnv(&cfg.HTTP)
+	loadRateLimitEnv(&cfg.RateLimit)
+	loadWebhookEnv(&cfg.Webhook)
 	loadLoggingEnv(&cfg.Logging)
 
 	if err := cfg.Compile(); err != nil {
@@ -242,6 +309,9 @@ func loadServerSecurityEnv(s *ServerConfig) {
 	if val := getEnv("SERVER_TLS_KEY", ""); val != "" {
 		s.TLSKeyFile = val
 	}
+	if val := getEnv("SERVER_REQUIRE_TLS", ""); val != "" {
+		s.RequireTLS = parseBool(val, s.RequireTLS)
+	}
 	if val := getEnv("SERVER_ALLOW_INSECURE_AUTH", ""); val != "" {
 		s.AllowInsecureAuth = parseBool(val, s.AllowInsecureAuth)
 	}
@@ -281,6 +351,111 @@ func loadRelayEnv(r *RelayConfig) {
 	if val := getEnv("SENDER_OVERRIDE", getEnv("MASQUERADE_DOMAINS", "")); val != "" {
 		r.SenderOverride = val
 	}
+	if val := getEnv("RELAY_STRATEGY", ""); val != "" {
+		r.Strategy = strings.ToLower(val)
+	}
+	if val := getEnv("RELAY_UPSTREAMS", ""); val != "" {
+		r.Upstreams = parseUpstreamsEnv(val)
+	}
+	if val := getEnv("RELAY_DOMAIN_ROUTES", ""); val != "" {
+		r.DomainRoutes = parseDomainRoutesEnv(val)
+	}
+}
+
+func parseUpstreamsEnv(val string) []UpstreamRelay {
+	val = strings.TrimSpace(val)
+	if strings.HasPrefix(val, "[") {
+		var list []UpstreamRelay
+		if err := json.Unmarshal([]byte(val), &list); err == nil {
+			return list
+		}
+	}
+
+	var upstreams []UpstreamRelay
+	entries := splitList(val)
+	for i, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		port := 587
+		tlsType := "AUTO"
+		if strings.HasPrefix(entry, "smtps://") {
+			port = 465
+			tlsType = "TLS"
+			entry = strings.TrimPrefix(entry, "smtps://")
+		} else if strings.HasPrefix(entry, "smtp://") {
+			entry = strings.TrimPrefix(entry, "smtp://")
+		}
+
+		username := ""
+		password := ""
+		if strings.Contains(entry, "@") {
+			parts := strings.SplitN(entry, "@", 2)
+			userInfo := parts[0]
+			entry = parts[1]
+			if strings.Contains(userInfo, ":") {
+				uParts := strings.SplitN(userInfo, ":", 2)
+				username = uParts[0]
+				password = uParts[1]
+			} else {
+				username = userInfo
+			}
+		}
+
+		host := entry
+		if h, pStr, err := net.SplitHostPort(entry); err == nil {
+			host = h
+			if p, err := strconv.Atoi(pStr); err == nil {
+				port = p
+			}
+		}
+
+		name := host
+		if name == "" {
+			name = fmt.Sprintf("upstream-%d", i+1)
+		}
+
+		upstreams = append(upstreams, UpstreamRelay{
+			Name:     name,
+			Host:     host,
+			Port:     port,
+			Username: username,
+			Password: password,
+			AuthType: "AUTO",
+			TLSType:  tlsType,
+		})
+	}
+	return upstreams
+}
+
+func parseDomainRoutesEnv(val string) map[string]string {
+	routes := make(map[string]string)
+	// Check if JSON object
+	if strings.HasPrefix(strings.TrimSpace(val), "{") {
+		_ = json.Unmarshal([]byte(val), &routes)
+		return routes
+	}
+
+	// Comma separated list of domain=target or domain:target
+	entries := splitList(val)
+	for _, entry := range entries {
+		var domain, target string
+		if strings.Contains(entry, "=") {
+			parts := strings.SplitN(entry, "=", 2)
+			domain = strings.TrimSpace(parts[0])
+			target = strings.TrimSpace(parts[1])
+		} else if strings.Contains(entry, "->") {
+			parts := strings.SplitN(entry, "->", 2)
+			domain = strings.TrimSpace(parts[0])
+			target = strings.TrimSpace(parts[1])
+		}
+		if domain != "" && target != "" {
+			routes[strings.ToLower(domain)] = target
+		}
+	}
+	return routes
 }
 
 func loadQueueEnv(q *QueueConfig) {
@@ -318,6 +493,45 @@ func loadHTTPEnv(h *HTTPConfig) {
 			h.ListenAddr = val
 		}
 	}
+	if val := getEnv("HTTP_API_KEY", getEnv("API_KEY", "")); val != "" {
+		h.APIKey = val
+	}
+	if val := getEnv("HTTP_DASHBOARD_ENABLED", ""); val != "" {
+		h.DashboardEnabled = parseBool(val, h.DashboardEnabled)
+	}
+}
+
+func loadRateLimitEnv(rl *RateLimitConfig) {
+	if val := getEnv("RATE_LIMIT_ENABLED", ""); val != "" {
+		rl.Enabled = parseBool(val, rl.Enabled)
+	}
+	if val := getEnv("RATE_LIMIT_MAX_PER_MINUTE", ""); val != "" {
+		if m, err := strconv.Atoi(val); err == nil {
+			rl.MaxPerMinute = m
+		}
+	}
+	if val := getEnv("RATE_LIMIT_BURST", ""); val != "" {
+		if b, err := strconv.Atoi(val); err == nil {
+			rl.Burst = b
+		}
+	}
+}
+
+func loadWebhookEnv(w *WebhookConfig) {
+	if val := getEnv("WEBHOOK_ENABLED", ""); val != "" {
+		w.Enabled = parseBool(val, w.Enabled)
+	}
+	if val := getEnv("WEBHOOK_URL", ""); val != "" {
+		w.URL = val
+	}
+	if val := getEnv("WEBHOOK_SECRET", ""); val != "" {
+		w.Secret = val
+	}
+	if val := getEnv("WEBHOOK_TIMEOUT", ""); val != "" {
+		if d, err := time.ParseDuration(val); err == nil {
+			w.Timeout = Duration{Duration: d}
+		}
+	}
 }
 
 func loadLoggingEnv(l *LoggingConfig) {
@@ -335,6 +549,7 @@ func (c *Config) Compile() error {
 		return err
 	}
 	c.compileCredentials()
+	c.compileRelay()
 	return nil
 }
 
@@ -384,6 +599,22 @@ func (c *Config) compileCredentials() {
 		if len(parts) == 2 {
 			c.Server.UserCredentials[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 		}
+	}
+}
+
+func (c *Config) compileRelay() {
+	// If Host is set but not in Upstreams list, add it as default upstream
+	if c.Relay.Host != "" && len(c.Relay.Upstreams) == 0 {
+		c.Relay.Upstreams = append(c.Relay.Upstreams, UpstreamRelay{
+			Name:               "default",
+			Host:               c.Relay.Host,
+			Port:               c.Relay.Port,
+			Username:           c.Relay.Username,
+			Password:           c.Relay.Password,
+			AuthType:           c.Relay.AuthType,
+			TLSType:            c.Relay.TLSType,
+			InsecureSkipVerify: c.Relay.InsecureSkipVerify,
+		})
 	}
 }
 
@@ -441,9 +672,8 @@ func parseBool(val string, def bool) bool {
 
 func splitList(val string) []string {
 	var res []string
-	// support comma, space, or semicolon separated list
 	fields := strings.FieldsFunc(val, func(r rune) bool {
-		return r == ',' || r == ' ' || r == ';'
+		return r == ',' || r == ';'
 	})
 	for _, f := range fields {
 		f = strings.TrimSpace(f)
