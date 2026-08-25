@@ -175,3 +175,94 @@ func TestServerInvalidAuth(t *testing.T) {
 		t.Errorf("expected Auth with wrong password to fail, but succeeded")
 	}
 }
+
+func TestServerRateLimiting(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.ListenAddr = "127.0.0.1:0"
+	cfg.Server.AllowedNetworks = []string{"127.0.0.0/8"}
+	cfg.RateLimit.Enabled = true
+	cfg.RateLimit.MaxPerMinute = 60
+	cfg.RateLimit.Burst = 1
+	_ = cfg.Compile()
+
+	mockRelay := &mockRelayer{}
+	m := metrics.New()
+	q := queue.New(&cfg.Queue, mockRelay, m, nil)
+	_ = q.Start(context.Background())
+	defer q.Stop()
+
+	srv, err := New(cfg, q, mockRelay, m, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+	defer srv.Close()
+
+	go func() { _ = srv.Serve(listener) }()
+	addr := listener.Addr().String()
+
+	// 1st request should be allowed (uses the 1 burst token)
+	c1, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	if err := c1.Mail("test1@local"); err != nil {
+		t.Fatalf("1st mail failed: %v", err)
+	}
+	_ = c1.Quit()
+
+	// 2nd immediate request should be rejected by rate limiter
+	c2, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer c2.Close()
+
+	err = c2.Mail("test2@local")
+	if err == nil {
+		t.Errorf("expected 2nd immediate Mail to be rejected by rate limiter")
+	}
+}
+
+func TestServerRequireTLS(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.ListenAddr = "127.0.0.1:0"
+	cfg.Server.AllowedNetworks = []string{"127.0.0.0/8"}
+	cfg.Server.RequireTLS = true
+	_ = cfg.Compile()
+
+	mockRelay := &mockRelayer{}
+	m := metrics.New()
+	srv, err := New(cfg, nil, mockRelay, m, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+	defer srv.Close()
+
+	go func() { _ = srv.Serve(listener) }()
+	addr := listener.Addr().String()
+
+	client, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer client.Close()
+
+	// MAIL FROM without STARTTLS should fail
+	err = client.Mail("unencrypted@local")
+	if err == nil {
+		t.Errorf("expected Mail without TLS to be rejected when RequireTLS is enabled")
+	}
+}
+

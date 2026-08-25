@@ -112,3 +112,53 @@ func TestDurationJSON(t *testing.T) {
 		t.Errorf("expected %v, got %v", d.Duration, d2.Duration)
 	}
 }
+
+func TestNewFeaturesConfig(t *testing.T) {
+	os.Setenv("RATE_LIMIT_ENABLED", "true")
+	os.Setenv("RATE_LIMIT_MAX_PER_MINUTE", "300")
+	os.Setenv("RATE_LIMIT_BURST", "50")
+	os.Setenv("WEBHOOK_ENABLED", "true")
+	os.Setenv("WEBHOOK_URL", "https://api.example.com/events")
+	os.Setenv("WEBHOOK_SECRET", "supersecret")
+	os.Setenv("HTTP_API_KEY", "key-12345")
+	os.Setenv("SERVER_REQUIRE_TLS", "true")
+	os.Setenv("RELAY_DOMAIN_ROUTES", "corp.local=internal.relay:25,gmail.com=smtp.gmail.com:587")
+	os.Setenv("RELAY_UPSTREAMS", "smtp://user:pass@backup.relay:587")
+	defer func() {
+		os.Unsetenv("RATE_LIMIT_ENABLED")
+		os.Unsetenv("RATE_LIMIT_MAX_PER_MINUTE")
+		os.Unsetenv("RATE_LIMIT_BURST")
+		os.Unsetenv("WEBHOOK_ENABLED")
+		os.Unsetenv("WEBHOOK_URL")
+		os.Unsetenv("WEBHOOK_SECRET")
+		os.Unsetenv("HTTP_API_KEY")
+		os.Unsetenv("SERVER_REQUIRE_TLS")
+		os.Unsetenv("RELAY_DOMAIN_ROUTES")
+		os.Unsetenv("RELAY_UPSTREAMS")
+	}()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if !cfg.RateLimit.Enabled || cfg.RateLimit.MaxPerMinute != 300 || cfg.RateLimit.Burst != 50 {
+		t.Errorf("unexpected rate limit config: %+v", cfg.RateLimit)
+	}
+	if !cfg.Webhook.Enabled || cfg.Webhook.URL != "https://api.example.com/events" || cfg.Webhook.Secret != "supersecret" {
+		t.Errorf("unexpected webhook config: %+v", cfg.Webhook)
+	}
+	if cfg.HTTP.APIKey != "key-12345" {
+		t.Errorf("expected API key key-12345, got %s", cfg.HTTP.APIKey)
+	}
+	if !cfg.Server.RequireTLS {
+		t.Errorf("expected RequireTLS to be true")
+	}
+	if cfg.Relay.DomainRoutes["corp.local"] != "internal.relay:25" {
+		t.Errorf("expected domain route for corp.local, got %v", cfg.Relay.DomainRoutes)
+	}
+	if len(cfg.Relay.Upstreams) == 0 || cfg.Relay.Upstreams[0].Host != "backup.relay" {
+		t.Errorf("expected upstream backup.relay, got %+v", cfg.Relay.Upstreams)
+	}
+}
+

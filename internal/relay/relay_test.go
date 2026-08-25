@@ -123,3 +123,108 @@ func TestLoginAuth(t *testing.T) {
 		t.Errorf("expected nil response at completion, got %v", resp)
 	}
 }
+
+func startMockServer(t *testing.T) (net.Listener, int) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go handleMockConn(conn)
+		}
+	}()
+	return l, port
+}
+
+func handleMockConn(c net.Conn) {
+	defer c.Close()
+	_, _ = c.Write([]byte("220 mock.smtp Service Ready\r\n"))
+	buf := make([]byte, 1024)
+	for {
+		n, err := c.Read(buf)
+		if err != nil {
+			return
+		}
+		response, shouldQuit := mockSMTPResponse(buf[:n])
+		if response != "" {
+			_, _ = c.Write([]byte(response))
+		}
+		if shouldQuit {
+			return
+		}
+	}
+}
+
+func mockSMTPResponse(data []byte) (string, bool) {
+	switch {
+	case bytes.HasPrefix(data, []byte("EHLO")), bytes.HasPrefix(data, []byte("HELO")):
+		return "250-mock.smtp\r\n250 HELP\r\n", false
+	case bytes.HasPrefix(data, []byte("MAIL FROM:")):
+		return "250 2.1.0 Ok\r\n", false
+	case bytes.HasPrefix(data, []byte("RCPT TO:")):
+		return "250 2.1.5 Ok\r\n", false
+	case bytes.HasPrefix(data, []byte("DATA")):
+		return "354 End data with <CR><LF>.<CR><LF>\r\n", false
+	case bytes.Contains(data, []byte("\r\n.\r\n")), string(data) == ".\r\n":
+		return "250 2.0.0 Ok: queued\r\n", false
+	case bytes.HasPrefix(data, []byte("QUIT")):
+		return "221 2.0.0 Bye\r\n", true
+	default:
+		return "250 Ok\r\n", false
+	}
+}
+
+func TestMultiRelayFailover(t *testing.T) {
+	// Server 1 is intentionally on a closed/invalid port to simulate failure
+	l2, port2 := startMockServer(t)
+	defer l2.Close()
+
+	cfg := &config.RelayConfig{
+		Strategy: "failover",
+		Upstreams: []config.UpstreamRelay{
+			{Name: "broken-primary", Host: "127.0.0.1", Port: 65432, TLSType: "NONE", AuthType: "NONE"},
+			{Name: "working-secondary", Host: "127.0.0.1", Port: port2, TLSType: "NONE", AuthType: "NONE"},
+		},
+	}
+
+	client := NewClient(cfg, metrics.New(), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Send(ctx, "sender@test.local", []string{"recipient@test.local"}, []byte("Subject: Failover Test\r\n\r\nBody"))
+	if err != nil {
+		t.Fatalf("expected failover to succeed on second upstream, got err: %v", err)
+	}
+}
+
+func TestDomainRouting(t *testing.T) {
+	lCorp, portCorp := startMockServer(t)
+	defer lCorp.Close()
+
+	cfg := &config.RelayConfig{
+		DomainRoutes: map[string]string{
+			"corp.internal": net.JoinHostPort("127.0.0.1", string(rune(portCorp))),
+		},
+		Upstreams: []config.UpstreamRelay{
+			{Name: "corp", Host: "127.0.0.1", Port: portCorp, TLSType: "NONE", AuthType: "NONE"},
+		},
+	}
+	cfg.DomainRoutes["corp.internal"] = "corp"
+
+	client := NewClient(cfg, metrics.New(), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Send(ctx, "sender@test.local", []string{"alice@corp.internal"}, []byte("Subject: Internal\r\n\r\nInternal message"))
+	if err != nil {
+		t.Fatalf("domain routed send failed: %v", err)
+	}
+}
+

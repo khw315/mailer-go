@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	version   = "1.0.0"
+	version   = "1.1.0"
 	buildDate = "unknown"
 )
 
@@ -40,6 +40,9 @@ func main() {
 		"hostname", cfg.Server.Hostname,
 		"relay_host", cfg.Relay.Host,
 		"relay_port", cfg.Relay.Port,
+		"upstreams", len(cfg.Relay.Upstreams),
+		"rate_limit", cfg.RateLimit.Enabled,
+		"webhook", cfg.Webhook.Enabled,
 	)
 
 	appMetrics := metrics.Default
@@ -47,13 +50,22 @@ func main() {
 
 	deliveryQueue := initQueue(cfg, relayClient, appMetrics, logger)
 
+	// Setup Webhook Dispatcher
+	if cfg.Webhook.Enabled && cfg.Webhook.URL != "" && deliveryQueue != nil {
+		webhookDispatcher := api.NewWebhookDispatcher(&cfg.Webhook, logger)
+		deliveryQueue.AddHook(func(event string, item *queue.QueuedEmail, deliveryErr error) {
+			webhookDispatcher.Dispatch(event, item, deliveryErr)
+		})
+		logger.Info("delivery webhook notifications enabled", "url", cfg.Webhook.URL)
+	}
+
 	smtpServer, err := server.New(cfg, deliveryQueue, relayClient, appMetrics, logger)
 	if err != nil {
 		logger.Error("failed to initialize SMTP server", "err", err)
 		os.Exit(1)
 	}
 
-	httpAPIServer := startHTTPServer(cfg, appMetrics, logger)
+	httpAPIServer := startHTTPServer(cfg, deliveryQueue, relayClient, appMetrics, logger)
 
 	go func() {
 		if err := smtpServer.Start(); err != nil {
@@ -76,11 +88,11 @@ func initQueue(cfg *config.Config, relayClient relay.Relayer, m *metrics.Metrics
 	return q
 }
 
-func startHTTPServer(cfg *config.Config, m *metrics.Metrics, logger *slog.Logger) *api.Server {
+func startHTTPServer(cfg *config.Config, q *queue.Queue, r relay.Relayer, m *metrics.Metrics, logger *slog.Logger) *api.Server {
 	if !cfg.HTTP.Enabled {
 		return nil
 	}
-	srv := api.NewServer(&cfg.HTTP, m, logger)
+	srv := api.NewServer(&cfg.HTTP, q, r, m, logger)
 	go func() {
 		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
 			logger.Error("HTTP API server encountered an error", "err", err)

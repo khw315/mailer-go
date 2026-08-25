@@ -112,3 +112,69 @@ func TestQueueRetryAndSpool(t *testing.T) {
 		t.Errorf("expected active spool dir to be empty, found %d files", len(entries))
 	}
 }
+
+func TestQueueDLQAndRetry(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "mailer-dlq-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	var shouldFail atomic.Bool
+	shouldFail.Store(true)
+
+	mock := &mockRelayer{
+		sendFunc: func(ctx context.Context, from string, to []string, msg []byte) error {
+			if shouldFail.Load() {
+				return errors.New("fatal delivery failure")
+			}
+			return nil
+		},
+	}
+
+	cfg := &config.QueueConfig{
+		Enabled:        true,
+		SpoolDir:       tempDir,
+		MaxRetries:     2,
+		RetryInterval:  config.Duration{Duration: 10 * time.Millisecond},
+		MaxConcurrency: 1,
+	}
+
+	q := New(cfg, mock, metrics.New(), nil)
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer q.Stop()
+
+	id, err := q.Enqueue("dlq@example.com", []string{"target@example.com"}, []byte("Subject: DLQ Test\r\n\r\nFailing"))
+	if err != nil {
+		t.Fatalf("Enqueue failed: %v", err)
+	}
+
+	// Wait for retries to exhaust and move to DLQ
+	time.Sleep(150 * time.Millisecond)
+
+	dlqItems := q.GetDLQ()
+	if len(dlqItems) == 0 {
+		t.Fatalf("expected item to be in DLQ, but DLQ is empty")
+	}
+	if dlqItems[0].ID != id {
+		t.Errorf("expected DLQ item ID %s, got %s", id, dlqItems[0].ID)
+	}
+
+	// Now fix the relayer and trigger RetryFailed
+	shouldFail.Store(false)
+	ok, err := q.RetryFailed(id)
+	if err != nil || !ok {
+		t.Fatalf("RetryFailed failed: %v", err)
+	}
+
+	// Wait for delivery after retry
+	time.Sleep(100 * time.Millisecond)
+
+	dlqAfter := q.GetDLQ()
+	if len(dlqAfter) != 0 {
+		t.Errorf("expected DLQ to be empty after successful retry, got %d items", len(dlqAfter))
+	}
+}
+

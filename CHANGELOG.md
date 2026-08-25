@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-08-25
+
+### Features
+
+- **HTTP REST Mail Submission API (`/v1/send` & `/api/send`)**: Post JSON payloads directly (`to`, `from`, `subject`, `text`, `html`, `headers`, base64 `attachments`) without opening raw SMTP socket connections.
+- **Embedded Web Management Dashboard**: Responsive, lightweight dashboard accessible at `http://localhost:8080/dashboard` for monitoring active queue items, Dead Letter Queue (DLQ), live stats, flushing queues, and quick email sending.
+- **Dead Letter Queue (DLQ) & Spool Management REST API**: Messages that exceed retry limits are cleanly isolated to DLQ (`spool/failed`) with full metadata and can be inspected (`GET /api/queue`), retried (`POST /api/queue/retry`), flushed (`POST /api/queue/flush`), or deleted (`DELETE /api/queue/{id}`).
+- **Smart Routing & Multi-Relay Failover**: Support for multiple upstream relays (`RELAY_UPSTREAMS`) with `failover` or `round-robin` strategies, plus Domain-Based Routing (`RELAY_DOMAIN_ROUTES`) to send emails to specific upstreams based on recipient domains.
+- **Asynchronous Delivery Webhooks**: Dispatch HTTP POST callbacks with HMAC SHA-256 signatures (`X-Mailer-Signature`) on email events (`queued`, `delivered`, `failed`, `dlq`, `retry`).
+
+### Security
+
+- **Token Bucket Rate Limiting**: Built-in rate limiter (`RATE_LIMIT_ENABLED`, `RATE_LIMIT_MAX_PER_MINUTE`, `RATE_LIMIT_BURST`) per client IP to safeguard against abuse and sender flooding.
+- **Inbound TLS Enforcement (`SERVER_REQUIRE_TLS`)**: Reject unencrypted `MAIL FROM` commands with `530 Must issue a STARTTLS command first` when TLS is enforced.
+- **REST API Key Authentication (`HTTP_API_KEY`)**: Protect HTTP REST API and queue management endpoints with `X-API-Key` or `Authorization: Bearer <key>`.
+
+---
+
 ## [1.0.1] - 2026-08-21
 
 ### Features

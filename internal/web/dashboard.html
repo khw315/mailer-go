@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mailer-go | Relay Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-color: #0f172a;
+      --card-bg: rgba(30, 41, 59, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --primary: #38bdf8;
+      --primary-hover: #0ea5e9;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --font-sans: 'Inter', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.12) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(139, 92, 246, 0.12) 0px, transparent 50%);
+      background-attachment: fixed;
+    }
+
+    header {
+      padding: 1.25rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(15, 23, 42, 0.85);
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #38bdf8, #6366f1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 1.2rem;
+      color: white;
+      box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+    }
+
+    .logo-text h1 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .logo-text span {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .badge-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.35rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+
+    main {
+      flex: 1;
+      padding: 2rem;
+      max-width: 1400px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1.25rem;
+      margin-bottom: 2rem;
+    }
+
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 1.25rem;
+      backdrop-filter: blur(10px);
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .stat-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(56, 189, 248, 0.4);
+    }
+
+    .stat-title {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      font-weight: 500;
+      margin-bottom: 0.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .stat-value {
+      font-size: 1.75rem;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      letter-spacing: -0.03em;
+    }
+
+    .tabs-container {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      overflow: hidden;
+      backdrop-filter: blur(12px);
+    }
+
+    .tab-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--card-border);
+      padding: 0.5rem 1.5rem;
+      background: rgba(15, 23, 42, 0.4);
+    }
+
+    .tab-buttons {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .tab-btn {
+      padding: 0.75rem 1.25rem;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s ease;
+    }
+
+    .tab-btn.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+    }
+
+    .tab-btn:hover:not(.active) {
+      color: var(--text-main);
+    }
+
+    .btn {
+      padding: 0.55rem 1rem;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+      border: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: #0f172a;
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-hover);
+      box-shadow: 0 0 15px rgba(56, 189, 248, 0.4);
+    }
+
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+    }
+
+    .btn-outline:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--danger);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .btn-danger:hover {
+      background: var(--danger);
+      color: white;
+    }
+
+    .btn-sm {
+      padding: 0.3rem 0.65rem;
+      font-size: 0.75rem;
+    }
+
+    .tab-content {
+      padding: 1.5rem;
+      min-height: 300px;
+    }
+
+    .table-responsive {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.875rem;
+    }
+
+    th {
+      padding: 0.85rem 1rem;
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--card-border);
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+    }
+
+    td {
+      padding: 0.9rem 1rem;
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 0.25rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      font-weight: 500;
+    }
+
+    .tag-queued { background: rgba(56, 189, 248, 0.15); color: var(--primary); }
+    .tag-failed { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+    .tag-delivered { background: rgba(16, 185, 129, 0.15); color: var(--success); }
+
+    .empty-state {
+      text-align: center;
+      padding: 4rem 1rem;
+      color: var(--text-muted);
+    }
+
+    .empty-state svg {
+      width: 48px;
+      height: 48px;
+      margin-bottom: 1rem;
+      opacity: 0.4;
+    }
+
+    /* Modal */
+    .modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(8px);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+
+    .modal.open {
+      display: flex;
+    }
+
+    .modal-card {
+      background: #1e293b;
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 600px;
+      padding: 1.75rem;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+
+    .form-group {
+      margin-bottom: 1rem;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 0.4rem;
+    }
+
+    .form-control {
+      width: 100%;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 0.6rem 0.85rem;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .form-control:focus {
+      border-color: var(--primary);
+    }
+
+    textarea.form-control {
+      resize: vertical;
+      min-height: 90px;
+    }
+
+    footer {
+      padding: 1.5rem;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      border-top: 1px solid var(--card-border);
+      margin-top: 2rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo-container">
+      <div class="logo-icon">M</div>
+      <div class="logo-text">
+        <h1>mailer-go</h1>
+        <span>SMTP Smart-Host Relay & Direct MX Mailer</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div class="badge-status">
+        <div class="status-dot"></div>
+        <span id="uptimeBadge">Uptime: --</span>
+      </div>
+      <button class="btn btn-primary" onclick="openSendModal()">
+        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+        Quick Send
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-title">Emails Received</div>
+        <div class="stat-value" id="statReceived">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Emails Relayed</div>
+        <div class="stat-value" id="statRelayed" style="color: var(--success);">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Active Queue</div>
+        <div class="stat-value" id="statQueue" style="color: var(--primary);">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Dead Letter / Failed</div>
+        <div class="stat-value" id="statFailed" style="color: var(--danger);">0</div>
+      </div>
+    </div>
+
+    <div class="tabs-container">
+      <div class="tab-header">
+        <div class="tab-buttons">
+          <button class="tab-btn active" id="tabActiveBtn" onclick="switchTab('active')">Active Queue (<span id="activeCountBadge">0</span>)</button>
+          <button class="tab-btn" id="tabDLQBtn" onclick="switchTab('dlq')">Dead Letter Queue (DLQ) (<span id="dlqCountBadge">0</span>)</button>
+        </div>
+        <div style="display: flex; gap: 0.5rem;">
+          <button class="btn btn-outline btn-sm" onclick="fetchData()">
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            Refresh
+          </button>
+          <button class="btn btn-outline btn-sm" onclick="flushQueue()">
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            Flush Queue
+          </button>
+        </div>
+      </div>
+
+      <div class="tab-content" id="tabActiveContent">
+        <div class="table-responsive">
+          <table id="activeTable">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>From</th>
+                <th>To</th>
+                <th>Subject</th>
+                <th>Retries</th>
+                <th>Next Attempt</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="activeTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="tab-content" id="tabDLQContent" style="display: none;">
+        <div class="table-responsive">
+          <table id="dlqTable">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>From</th>
+                <th>To</th>
+                <th>Subject</th>
+                <th>Error</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="dlqTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Quick Send Modal -->
+  <div class="modal" id="sendModal">
+    <div class="modal-card">
+      <h2 style="font-size: 1.25rem; font-weight: 700; margin-bottom: 1.25rem;">Send Email via HTTP API</h2>
+      <form id="sendForm" onsubmit="handleSendSubmit(event)">
+        <div class="form-group">
+          <label for="sendFrom">From Address</label>
+          <input type="email" class="form-control" id="sendFrom" required placeholder="app@example.com" />
+        </div>
+        <div class="form-group">
+          <label for="sendTo">To Address (comma separated)</label>
+          <input type="text" class="form-control" id="sendTo" required placeholder="recipient@example.com, other@example.com" />
+        </div>
+        <div class="form-group">
+          <label for="sendSubject">Subject</label>
+          <input type="text" class="form-control" id="sendSubject" required placeholder="Notification Title" />
+        </div>
+        <div class="form-group">
+          <label for="sendBody">HTML / Text Body</label>
+          <textarea class="form-control" id="sendBody" placeholder="<p>Hello from mailer-go HTTP API</p>"></textarea>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1.5rem;">
+          <button type="button" class="btn btn-outline" onclick="closeSendModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btnSubmitSend">Send Now</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <footer>
+    mailer-go &bull; High Performance SMTP Smart-Host Relay & Direct MX Mailer
+  </footer>
+
+  <script>
+    let currentTab = 'active';
+
+    function switchTab(tab) {
+      currentTab = tab;
+      document.getElementById('tabActiveBtn').classList.toggle('active', tab === 'active');
+      document.getElementById('tabDLQBtn').classList.toggle('active', tab === 'dlq');
+      document.getElementById('tabActiveContent').style.display = tab === 'active' ? 'block' : 'none';
+      document.getElementById('tabDLQContent').style.display = tab === 'dlq' ? 'block' : 'none';
+    }
+
+    async function fetchData() {
+      try {
+        const statsRes = await fetch('/api/stats');
+        if (statsRes.ok) {
+          const stats = await statsRes.json();
+          document.getElementById('statReceived').innerText = stats.emails_received || 0;
+          document.getElementById('statRelayed').innerText = stats.emails_relayed || 0;
+          document.getElementById('statQueue').innerText = stats.queue_length || 0;
+          document.getElementById('statFailed').innerText = stats.emails_failed || 0;
+          
+          const uptimeSec = Math.floor(stats.uptime_seconds || 0);
+          const h = Math.floor(uptimeSec / 3600);
+          const m = Math.floor((uptimeSec % 3600) / 60);
+          const s = uptimeSec % 60;
+          document.getElementById('uptimeBadge').innerText = `Uptime: ${h}h ${m}m ${s}s`;
+        }
+
+        const queueRes = await fetch('/api/queue');
+        if (queueRes.ok) {
+          const data = await queueRes.json();
+          renderActiveTable(data.active || []);
+          renderDLQTable(data.dlq || []);
+          document.getElementById('activeCountBadge').innerText = (data.active || []).length;
+          document.getElementById('dlqCountBadge').innerText = (data.dlq || []).length;
+        }
+      } catch (e) {
+        console.error('Failed fetching status:', e);
+      }
+    }
+
+    function renderActiveTable(items) {
+      const tbody = document.getElementById('activeTableBody');
+      if (items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No emails currently in active queue.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td><span class="tag tag-queued">${item.id}</span></td>
+          <td>${escapeHtml(item.from)}</td>
+          <td>${escapeHtml((item.to || []).join(', '))}</td>
+          <td>${escapeHtml(item.subject || '(no subject)')}</td>
+          <td>${item.retries || 0}</td>
+          <td>${new Date(item.next_attempt).toLocaleTimeString()}</td>
+          <td>
+            <button class="btn btn-danger btn-sm" onclick="deleteItem('${item.id}')">Delete</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function renderDLQTable(items) {
+      const tbody = document.getElementById('dlqTableBody');
+      if (items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Dead letter queue is empty.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td><span class="tag tag-failed">${item.id}</span></td>
+          <td>${escapeHtml(item.from)}</td>
+          <td>${escapeHtml((item.to || []).join(', '))}</td>
+          <td>${escapeHtml(item.subject || '(no subject)')}</td>
+          <td style="color: var(--danger); font-size: 0.8rem;">${escapeHtml(item.last_error || 'Permanent error')}</td>
+          <td>
+            <button class="btn btn-primary btn-sm" onclick="retryItem('${item.id}')">Retry</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteItem('${item.id}')">Delete</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    async function retryItem(id) {
+      await fetch('/api/queue/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      fetchData();
+    }
+
+    async function deleteItem(id) {
+      if (!confirm('Are you sure you want to delete message ' + id + '?')) return;
+      await fetch('/api/queue/' + id, { method: 'DELETE' });
+      fetchData();
+    }
+
+    async function flushQueue() {
+      await fetch('/api/queue/flush', { method: 'POST' });
+      fetchData();
+    }
+
+    function openSendModal() { document.getElementById('sendModal').classList.add('open'); }
+    function closeSendModal() { document.getElementById('sendModal').classList.remove('open'); }
+
+    async function handleSendSubmit(e) {
+      e.preventDefault();
+      const from = document.getElementById('sendFrom').value;
+      const to = document.getElementById('sendTo').value.split(',').map(s => s.trim()).filter(Boolean);
+      const subject = document.getElementById('sendSubject').value;
+      const body = document.getElementById('sendBody').value;
+
+      const payload = { from, to, subject, html: body, text: body };
+      const btn = document.getElementById('btnSubmitSend');
+      btn.disabled = true;
+      btn.innerText = 'Sending...';
+
+      try {
+        const res = await fetch('/v1/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const json = await res.json();
+        if (res.ok) {
+          alert('Email successfully accepted! ID: ' + (json.id || 'OK'));
+          closeSendModal();
+          document.getElementById('sendForm').reset();
+          fetchData();
+        } else {
+          alert('Error: ' + (json.error || 'Failed to send'));
+        }
+      } catch (err) {
+        alert('Send request failed: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = 'Send Now';
+      }
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Auto poll every 4 seconds
+    fetchData();
+    setInterval(fetchData, 4000);
+  </script>
+</body>
+</html>
