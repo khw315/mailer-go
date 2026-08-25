@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+const (
+	headerContentType             = "Content-Type"
+	headerContentTransferEncoding = "Content-Transfer-Encoding"
+	headerContentDisposition      = "Content-Disposition"
+	mimeTextPlainUTF8             = "text/plain; charset=UTF-8"
+	mimeTextHTMLUTF8              = "text/html; charset=UTF-8"
+	encoding8bit                  = "8bit"
+	encodingBase64                = "base64"
+)
+
 // SendRequest represents the JSON payload for the HTTP email submission API (/v1/send).
 type SendRequest struct {
 	From        string            `json:"from"`
@@ -34,152 +44,177 @@ type Attachment struct {
 
 // BuildMIME converts a SendRequest into standard RFC 5322/2046 MIME message bytes.
 func BuildMIME(req *SendRequest) ([]byte, error) {
-	if req.From == "" {
-		return nil, fmt.Errorf("sender 'from' is required")
-	}
-	if len(req.To) == 0 && len(req.Cc) == 0 && len(req.Bcc) == 0 {
-		return nil, fmt.Errorf("at least one recipient ('to', 'cc', or 'bcc') is required")
-	}
-	if req.Subject == "" {
-		req.Subject = "(no subject)"
+	if err := validateSendRequest(req); err != nil {
+		return nil, err
 	}
 
 	var buf bytes.Buffer
-
-	// Standard Headers
-	fmt.Fprintf(&buf, "From: %s\r\n", req.From)
-	fmt.Fprintf(&buf, "To: %s\r\n", strings.Join(req.To, ", "))
-	if len(req.Cc) > 0 {
-		fmt.Fprintf(&buf, "Cc: %s\r\n", strings.Join(req.Cc, ", "))
-	}
-	if req.ReplyTo != "" {
-		fmt.Fprintf(&buf, "Reply-To: %s\r\n", req.ReplyTo)
-	}
-	fmt.Fprintf(&buf, "Subject: %s\r\n", req.Subject)
-	fmt.Fprintf(&buf, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
-	fmt.Fprintf(&buf, "Message-ID: <%d.%s@mailer-go>\r\n", time.Now().UnixNano(), req.From)
-	fmt.Fprintf(&buf, "MIME-Version: 1.0\r\n")
-
-	// Custom Headers
-	for k, v := range req.Headers {
-		fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
-	}
+	writeStandardHeaders(&buf, req)
 
 	hasHTML := strings.TrimSpace(req.HTML) != ""
 	hasText := strings.TrimSpace(req.Text) != ""
 	hasAttachments := len(req.Attachments) > 0
 
-	// Case 1: Plain text only without attachments
-	if hasText && !hasHTML && !hasAttachments {
-		fmt.Fprintf(&buf, "Content-Type: text/plain; charset=UTF-8\r\n")
-		fmt.Fprintf(&buf, "Content-Transfer-Encoding: 8bit\r\n\r\n")
-		buf.WriteString(req.Text)
-		return buf.Bytes(), nil
+	if !hasAttachments {
+		if hasText && !hasHTML {
+			return appendSinglePart(&buf, mimeTextPlainUTF8, req.Text), nil
+		}
+		if hasHTML && !hasText {
+			return appendSinglePart(&buf, mimeTextHTMLUTF8, req.HTML), nil
+		}
+		return buildMultipartAlternative(&buf, req.Text, req.HTML)
 	}
 
-	// Case 2: HTML only without attachments
-	if hasHTML && !hasText && !hasAttachments {
-		fmt.Fprintf(&buf, "Content-Type: text/html; charset=UTF-8\r\n")
-		fmt.Fprintf(&buf, "Content-Transfer-Encoding: 8bit\r\n\r\n")
-		buf.WriteString(req.HTML)
-		return buf.Bytes(), nil
+	return buildMultipartMixed(&buf, req, hasText, hasHTML)
+}
+
+func validateSendRequest(req *SendRequest) error {
+	if req.From == "" {
+		return fmt.Errorf("sender 'from' is required")
+	}
+	if len(req.To) == 0 && len(req.Cc) == 0 && len(req.Bcc) == 0 {
+		return fmt.Errorf("at least one recipient ('to', 'cc', or 'bcc') is required")
+	}
+	if req.Subject == "" {
+		req.Subject = "(no subject)"
+	}
+	return nil
+}
+
+func writeStandardHeaders(buf *bytes.Buffer, req *SendRequest) {
+	fmt.Fprintf(buf, "From: %s\r\n", req.From)
+	fmt.Fprintf(buf, "To: %s\r\n", strings.Join(req.To, ", "))
+	if len(req.Cc) > 0 {
+		fmt.Fprintf(buf, "Cc: %s\r\n", strings.Join(req.Cc, ", "))
+	}
+	if req.ReplyTo != "" {
+		fmt.Fprintf(buf, "Reply-To: %s\r\n", req.ReplyTo)
+	}
+	fmt.Fprintf(buf, "Subject: %s\r\n", req.Subject)
+	fmt.Fprintf(buf, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+	fmt.Fprintf(buf, "Message-ID: <%d.%s@mailer-go>\r\n", time.Now().UnixNano(), req.From)
+	fmt.Fprintf(buf, "MIME-Version: 1.0\r\n")
+
+	for k, v := range req.Headers {
+		fmt.Fprintf(buf, "%s: %s\r\n", k, v)
+	}
+}
+
+func appendSinglePart(buf *bytes.Buffer, contentType, body string) []byte {
+	fmt.Fprintf(buf, "%s: %s\r\n", headerContentType, contentType)
+	fmt.Fprintf(buf, "%s: %s\r\n\r\n", headerContentTransferEncoding, encoding8bit)
+	buf.WriteString(body)
+	return buf.Bytes()
+}
+
+func buildMultipartMixed(buf *bytes.Buffer, req *SendRequest, hasText, hasHTML bool) ([]byte, error) {
+	mixedWriter := multipart.NewWriter(buf)
+	fmt.Fprintf(buf, "%s: multipart/mixed; boundary=\"%s\"\r\n\r\n", headerContentType, mixedWriter.Boundary())
+
+	if hasText && hasHTML {
+		if err := writeAlternativeContainer(buf, mixedWriter.Boundary(), req.Text, req.HTML); err != nil {
+			return nil, err
+		}
+	} else if hasHTML {
+		if err := writeSingleBodyPart(mixedWriter, mimeTextHTMLUTF8, req.HTML); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := writeSingleBodyPart(mixedWriter, mimeTextPlainUTF8, req.Text); err != nil {
+			return nil, err
+		}
 	}
 
-	// Multipart mixed (for attachments) or alternative (for text + HTML)
-	if hasAttachments {
-		mixedWriter := multipart.NewWriter(&buf)
-		fmt.Fprintf(&buf, "Content-Type: multipart/mixed; boundary=\"%s\"\r\n\r\n", mixedWriter.Boundary())
+	if err := writeAttachments(mixedWriter, req.Attachments); err != nil {
+		return nil, err
+	}
 
-		// Body container (alternative or plain/html)
-		if hasText && hasHTML {
-			altBuf := &bytes.Buffer{}
-			altWriter := multipart.NewWriter(altBuf)
-			fmt.Fprintf(&buf, "--%s\r\n", mixedWriter.Boundary())
-			fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altWriter.Boundary())
+	if err := mixedWriter.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
 
-			// Text part
-			textHeader := make(textproto.MIMEHeader)
-			textHeader.Set("Content-Type", "text/plain; charset=UTF-8")
-			textHeader.Set("Content-Transfer-Encoding", "8bit")
-			part, _ := altWriter.CreatePart(textHeader)
-			_, _ = part.Write([]byte(req.Text))
+func writeAlternativeContainer(buf *bytes.Buffer, mixedBoundary, text, html string) error {
+	altBuf := &bytes.Buffer{}
+	altWriter := multipart.NewWriter(altBuf)
+	fmt.Fprintf(buf, "--%s\r\n", mixedBoundary)
+	fmt.Fprintf(buf, "%s: multipart/alternative; boundary=\"%s\"\r\n\r\n", headerContentType, altWriter.Boundary())
 
-			// HTML part
-			htmlHeader := make(textproto.MIMEHeader)
-			htmlHeader.Set("Content-Type", "text/html; charset=UTF-8")
-			htmlHeader.Set("Content-Transfer-Encoding", "8bit")
-			partHTML, _ := altWriter.CreatePart(htmlHeader)
-			_, _ = partHTML.Write([]byte(req.HTML))
+	if err := writeSingleBodyPart(altWriter, mimeTextPlainUTF8, text); err != nil {
+		return err
+	}
+	if err := writeSingleBodyPart(altWriter, mimeTextHTMLUTF8, html); err != nil {
+		return err
+	}
 
-			_ = altWriter.Close()
-			buf.Write(altBuf.Bytes())
-		} else if hasHTML {
-			htmlHeader := make(textproto.MIMEHeader)
-			htmlHeader.Set("Content-Type", "text/html; charset=UTF-8")
-			htmlHeader.Set("Content-Transfer-Encoding", "8bit")
-			part, _ := mixedWriter.CreatePart(htmlHeader)
-			_, _ = part.Write([]byte(req.HTML))
-		} else {
-			textHeader := make(textproto.MIMEHeader)
-			textHeader.Set("Content-Type", "text/plain; charset=UTF-8")
-			textHeader.Set("Content-Transfer-Encoding", "8bit")
-			part, _ := mixedWriter.CreatePart(textHeader)
-			_, _ = part.Write([]byte(req.Text))
+	if err := altWriter.Close(); err != nil {
+		return err
+	}
+	buf.Write(altBuf.Bytes())
+	return nil
+}
+
+func writeSingleBodyPart(w *multipart.Writer, contentType, body string) error {
+	h := make(textproto.MIMEHeader)
+	h.Set(headerContentType, contentType)
+	h.Set(headerContentTransferEncoding, encoding8bit)
+	part, err := w.CreatePart(h)
+	if err != nil {
+		return err
+	}
+	_, err = part.Write([]byte(body))
+	return err
+}
+
+func writeAttachments(w *multipart.Writer, attachments []Attachment) error {
+	for _, att := range attachments {
+		cType := att.ContentType
+		if cType == "" {
+			cType = "application/octet-stream"
+		}
+		attHeader := make(textproto.MIMEHeader)
+		attHeader.Set(headerContentType, fmt.Sprintf("%s; name=\"%s\"", cType, att.Filename))
+		attHeader.Set(headerContentDisposition, fmt.Sprintf("attachment; filename=\"%s\"", att.Filename))
+		attHeader.Set(headerContentTransferEncoding, encodingBase64)
+
+		part, err := w.CreatePart(attHeader)
+		if err != nil {
+			return err
 		}
 
-		// Attachments
-		for _, att := range req.Attachments {
-			cType := att.ContentType
-			if cType == "" {
-				cType = "application/octet-stream"
-			}
-			attHeader := make(textproto.MIMEHeader)
-			attHeader.Set("Content-Type", fmt.Sprintf("%s; name=\"%s\"", cType, att.Filename))
-			attHeader.Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", att.Filename))
-			attHeader.Set("Content-Transfer-Encoding", "base64")
-
-			part, err := mixedWriter.CreatePart(attHeader)
-			if err != nil {
-				return nil, err
-			}
-
-			// Validate and write base64
-			decoded, err := base64.StdEncoding.DecodeString(att.Base64Data)
-			if err != nil {
-				return nil, fmt.Errorf("invalid base64 in attachment %s: %w", att.Filename, err)
-			}
-			encoded := base64.StdEncoding.EncodeToString(decoded)
-			for i := 0; i < len(encoded); i += 76 {
-				end := i + 76
-				if end > len(encoded) {
-					end = len(encoded)
-				}
-				_, _ = part.Write([]byte(encoded[i:end] + "\r\n"))
-			}
+		decoded, err := base64.StdEncoding.DecodeString(att.Base64Data)
+		if err != nil {
+			return fmt.Errorf("invalid base64 in attachment %s: %w", att.Filename, err)
 		}
 
-		_ = mixedWriter.Close()
-		return buf.Bytes(), nil
+		encoded := base64.StdEncoding.EncodeToString(decoded)
+		for i := 0; i < len(encoded); i += 76 {
+			end := i + 76
+			if end > len(encoded) {
+				end = len(encoded)
+			}
+			if _, err := part.Write([]byte(encoded[i:end] + "\r\n")); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func buildMultipartAlternative(buf *bytes.Buffer, text, html string) ([]byte, error) {
+	altWriter := multipart.NewWriter(buf)
+	fmt.Fprintf(buf, "%s: multipart/alternative; boundary=\"%s\"\r\n\r\n", headerContentType, altWriter.Boundary())
+
+	if err := writeSingleBodyPart(altWriter, mimeTextPlainUTF8, text); err != nil {
+		return nil, err
+	}
+	if err := writeSingleBodyPart(altWriter, mimeTextHTMLUTF8, html); err != nil {
+		return nil, err
 	}
 
-	// Multipart Alternative (Text + HTML without attachments)
-	altWriter := multipart.NewWriter(&buf)
-	fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altWriter.Boundary())
-
-	// Plain text part
-	textHeader := make(textproto.MIMEHeader)
-	textHeader.Set("Content-Type", "text/plain; charset=UTF-8")
-	textHeader.Set("Content-Transfer-Encoding", "8bit")
-	textPart, _ := altWriter.CreatePart(textHeader)
-	_, _ = textPart.Write([]byte(req.Text))
-
-	// HTML part
-	htmlHeader := make(textproto.MIMEHeader)
-	htmlHeader.Set("Content-Type", "text/html; charset=UTF-8")
-	htmlHeader.Set("Content-Transfer-Encoding", "8bit")
-	htmlPart, _ := altWriter.CreatePart(htmlHeader)
-	_, _ = htmlPart.Write([]byte(req.HTML))
-
-	_ = altWriter.Close()
+	if err := altWriter.Close(); err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
 }
