@@ -62,7 +62,7 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("QUEUE_ENABLED", "true")
 	os.Setenv("QUEUE_DIR", "/tmp/spool")
 	os.Setenv("QUEUE_MAX_RETRIES", "10")
-	os.Setenv("QUEUE_CONCURRENCY", "4")
+	os.Setenv("QUEUE_MAX_CONCURRENCY", "4")
 	os.Setenv("QUEUE_BACKOFF_INTERVAL", "15s")
 	os.Setenv("QUEUE_SCAN_INTERVAL", "30s")
 	os.Setenv("HTTP_ENABLED", "true")
@@ -94,7 +94,7 @@ func TestLoadFromEnv(t *testing.T) {
 		os.Unsetenv("QUEUE_ENABLED")
 		os.Unsetenv("QUEUE_DIR")
 		os.Unsetenv("QUEUE_MAX_RETRIES")
-		os.Unsetenv("QUEUE_CONCURRENCY")
+		os.Unsetenv("QUEUE_MAX_CONCURRENCY")
 		os.Unsetenv("QUEUE_BACKOFF_INTERVAL")
 		os.Unsetenv("QUEUE_SCAN_INTERVAL")
 		os.Unsetenv("HTTP_ENABLED")
@@ -157,7 +157,7 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.HTTP.ListenAddr != ":9090" || !cfg.HTTP.DashboardEnabled {
 		t.Errorf("got HTTP listen %s, dashboard %v", cfg.HTTP.ListenAddr, cfg.HTTP.DashboardEnabled)
 	}
-	if cfg.Logging.Level != "DEBUG" || cfg.Logging.Format != "JSON" {
+	if cfg.Logging.Level != "debug" || cfg.Logging.Format != "json" {
 		t.Errorf("unexpected logging config: %+v", cfg.Logging)
 	}
 
@@ -204,10 +204,10 @@ func TestDurationJSON(t *testing.T) {
 		t.Errorf("expected %v, got %v", d.Duration, d2.Duration)
 	}
 
-	// Unmarshal from numeric seconds
+	// Unmarshal from numeric nanoseconds
 	var dNum Duration
-	if err := dNum.UnmarshalJSON([]byte("120")); err != nil || dNum.Duration != 120*time.Second {
-		t.Errorf("expected numeric seconds unmarshal to 120s, got %v (err: %v)", dNum.Duration, err)
+	if err := dNum.UnmarshalJSON([]byte("120")); err != nil || dNum.Duration != 120 {
+		t.Errorf("expected numeric nanoseconds unmarshal to 120, got %v (err: %v)", dNum.Duration, err)
 	}
 
 	// Unmarshal invalid string
@@ -352,7 +352,7 @@ func TestParseUpstreamsAndDomainRoutesStringFormat(t *testing.T) {
 	}
 
 	// String format domain routes
-	domainRoutesStr := "corp.internal=internal.relay:25, gmail.com:smtp.gmail.com:587"
+	domainRoutesStr := "corp.internal=internal.relay:25, gmail.com->smtp.gmail.com:587"
 	routes := parseDomainRoutesEnv(domainRoutesStr)
 	if routes["corp.internal"] != "internal.relay:25" {
 		t.Errorf("expected corp.internal route, got %v", routes["corp.internal"])

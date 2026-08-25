@@ -146,8 +146,7 @@ func BuildMIME(req *SendRequest) ([]byte, error) {
 			// Validate and write base64
 			decoded, err := base64.StdEncoding.DecodeString(att.Base64Data)
 			if err != nil {
-				// If not valid base64, write raw string
-				decoded = []byte(att.Base64Data)
+				return nil, fmt.Errorf("invalid base64 in attachment %s: %w", att.Filename, err)
 			}
 			encoded := base64.StdEncoding.EncodeToString(decoded)
 			for i := 0; i < len(encoded); i += 76 {
