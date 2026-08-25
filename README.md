@@ -14,7 +14,7 @@ Designed as a drop-in, zero-overhead replacement for containerized **Postfix** r
 ## Highlights
 
 - **Postfix-Compatible Security (`mynetworks`)**: Native CIDR IP subnet whitelisting (`ALLOWED_NETWORKS`) allowing internal microservices and Docker containers to relay emails without credentials.
-- **SASL Authentication**: Built-in `PLAIN` and `LOGIN` SASL support for external authenticated clients and enterprise upstream relays.
+- **SASL Authentication**: Built-in `PLAIN` and `LOGIN` SASL support for external authenticated clients and upstream smart-host relays.
 - **Dual Delivery Modes & Multi-Relay**:
   - **Smart-Host Outbound Relay**: Forward emails to upstream providers (Gmail, SendGrid, Amazon SES, Mailgun, Office 365, etc.) via opportunistic STARTTLS (port 587/25) or direct TLS/SMTPS (port 465).
   - **Multi-Upstream Failover & Round-Robin**: Automatic fallback across multiple upstream relays (`RELAY_UPSTREAMS`).
