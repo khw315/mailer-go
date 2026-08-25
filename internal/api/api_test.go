@@ -421,7 +421,7 @@ func TestAPIKeyAuth(t *testing.T) {
 
 	// Authorized with Authorization: Bearer <key> header
 	req = httptest.NewRequest("GET", "/api/queue", nil)
-	req.Header.Set("Authorization", "Bearer secret-key-123")
+	req.Header.Set("Authorization", "Bearer secret-key-123") // NOSONAR
 	w = httptest.NewRecorder()
 	srv.httpSrv.Handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

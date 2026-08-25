@@ -39,6 +39,22 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 func TestLoadFromEnv(t *testing.T) {
+	setupTestEnv()
+	defer cleanupTestEnv()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	assertServerConfig(t, cfg)
+	assertRelayConfig(t, cfg)
+	assertQueueAndHTTPConfig(t, cfg)
+	assertAllowedNetworks(t, cfg)
+	assertInboundAuth(t, cfg)
+}
+
+func setupTestEnv() {
 	os.Setenv("SERVER_LISTEN_ADDR", "0.0.0.0:25")
 	os.Setenv("SERVER_HOSTNAME", "mail.example.org")
 	os.Setenv("SERVER_READ_TIMEOUT", "30s")
@@ -70,45 +86,24 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("HTTP_DASHBOARD_ENABLED", "true")
 	os.Setenv("LOG_LEVEL", "DEBUG")
 	os.Setenv("LOG_FORMAT", "JSON")
-	defer func() {
-		os.Unsetenv("SERVER_LISTEN_ADDR")
-		os.Unsetenv("SERVER_HOSTNAME")
-		os.Unsetenv("SERVER_READ_TIMEOUT")
-		os.Unsetenv("SERVER_WRITE_TIMEOUT")
-		os.Unsetenv("SERVER_MAX_MESSAGE_SIZE")
-		os.Unsetenv("SERVER_MAX_RECIPIENTS")
-		os.Unsetenv("SERVER_TLS_CERT")
-		os.Unsetenv("SERVER_TLS_KEY")
-		os.Unsetenv("SERVER_ALLOW_INSECURE_AUTH")
-		os.Unsetenv("RELAY_HOST")
-		os.Unsetenv("RELAY_PORT")
-		os.Unsetenv("RELAY_USER")
-		os.Unsetenv("RELAY_PASSWORD")
-		os.Unsetenv("RELAY_TLS_TYPE")
-		os.Unsetenv("RELAY_AUTH_TYPE")
-		os.Unsetenv("RELAY_INSECURE_SKIP_VERIFY")
-		os.Unsetenv("SENDER_OVERRIDE")
-		os.Unsetenv("RELAY_STRATEGY")
-		os.Unsetenv("ALLOWED_NETWORKS")
-		os.Unsetenv("INBOUND_USERS")
-		os.Unsetenv("QUEUE_ENABLED")
-		os.Unsetenv("QUEUE_DIR")
-		os.Unsetenv("QUEUE_MAX_RETRIES")
-		os.Unsetenv("QUEUE_MAX_CONCURRENCY")
-		os.Unsetenv("QUEUE_BACKOFF_INTERVAL")
-		os.Unsetenv("QUEUE_SCAN_INTERVAL")
-		os.Unsetenv("HTTP_ENABLED")
-		os.Unsetenv("HTTP_LISTEN_ADDR")
-		os.Unsetenv("HTTP_DASHBOARD_ENABLED")
-		os.Unsetenv("LOG_LEVEL")
-		os.Unsetenv("LOG_FORMAT")
-	}()
+}
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() failed: %v", err)
+func cleanupTestEnv() {
+	vars := []string{
+		"SERVER_LISTEN_ADDR", "SERVER_HOSTNAME", "SERVER_READ_TIMEOUT", "SERVER_WRITE_TIMEOUT",
+		"SERVER_MAX_MESSAGE_SIZE", "SERVER_MAX_RECIPIENTS", "SERVER_TLS_CERT", "SERVER_TLS_KEY",
+		"SERVER_ALLOW_INSECURE_AUTH", "RELAY_HOST", "RELAY_PORT", "RELAY_USER", "RELAY_PASSWORD",
+		"RELAY_TLS_TYPE", "RELAY_AUTH_TYPE", "RELAY_INSECURE_SKIP_VERIFY", "SENDER_OVERRIDE",
+		"RELAY_STRATEGY", "ALLOWED_NETWORKS", "INBOUND_USERS", "QUEUE_ENABLED", "QUEUE_DIR",
+		"QUEUE_MAX_RETRIES", "QUEUE_MAX_CONCURRENCY", "QUEUE_BACKOFF_INTERVAL", "QUEUE_SCAN_INTERVAL",
+		"HTTP_ENABLED", "HTTP_LISTEN_ADDR", "HTTP_DASHBOARD_ENABLED", "LOG_LEVEL", "LOG_FORMAT",
 	}
+	for _, v := range vars {
+		os.Unsetenv(v)
+	}
+}
 
+func assertServerConfig(t *testing.T, cfg *Config) {
 	if cfg.Server.ListenAddr != "0.0.0.0:25" {
 		t.Errorf("got listen addr %s, expected 0.0.0.0:25", cfg.Server.ListenAddr)
 	}
@@ -133,6 +128,9 @@ func TestLoadFromEnv(t *testing.T) {
 	if !cfg.Server.AllowInsecureAuth {
 		t.Errorf("expected AllowInsecureAuth to be true")
 	}
+}
+
+func assertRelayConfig(t *testing.T, cfg *Config) {
 	if cfg.Relay.Host != "smtp.example.com" || cfg.Relay.Port != 465 {
 		t.Errorf("got relay %s:%d, expected smtp.example.com:465", cfg.Relay.Host, cfg.Relay.Port)
 	}
@@ -151,6 +149,9 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.Relay.Strategy != "round-robin" {
 		t.Errorf("got relay strategy %s", cfg.Relay.Strategy)
 	}
+}
+
+func assertQueueAndHTTPConfig(t *testing.T, cfg *Config) {
 	if cfg.Queue.MaxRetries != 10 || cfg.Queue.MaxConcurrency != 4 {
 		t.Errorf("got queue max retries %d, concurrency %d", cfg.Queue.MaxRetries, cfg.Queue.MaxConcurrency)
 	}
@@ -160,8 +161,9 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.Logging.Level != "debug" || cfg.Logging.Format != "json" {
 		t.Errorf("unexpected logging config: %+v", cfg.Logging)
 	}
+}
 
-	// Verify allowed networks including single IP addresses
+func assertAllowedNetworks(t *testing.T, cfg *Config) {
 	if !cfg.IsIPAllowed(net.ParseIP("10.10.1.20")) {
 		t.Errorf("expected 10.10.1.20 to be allowed")
 	}
@@ -174,8 +176,9 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.IsIPAllowed(net.ParseIP("192.168.1.1")) {
 		t.Errorf("expected 192.168.1.1 to NOT be allowed with overridden networks")
 	}
+}
 
-	// Verify inbound authentication
+func assertInboundAuth(t *testing.T, cfg *Config) {
 	if !cfg.AuthenticateInbound("admin", "pass123") {
 		t.Errorf("expected admin:pass123 to authenticate successfully")
 	}
