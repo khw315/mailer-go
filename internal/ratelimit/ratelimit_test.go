@@ -60,3 +60,29 @@ func TestLimiterAllowIP(t *testing.T) {
 		t.Errorf("expected nil IP to be allowed")
 	}
 }
+
+func TestLimiterCleanup(t *testing.T) {
+	limiter := New(true, 60, 5)
+	limiter.cleanupEvery = 1 * time.Millisecond
+
+	limiter.Allow("stale-ip")
+
+	// Artificially age the visitor
+	limiter.mu.Lock()
+	if v, ok := limiter.visitors["stale-ip"]; ok {
+		v.lastRefill = time.Now().Add(-15 * time.Minute)
+		limiter.lastCleanup = time.Now().Add(-10 * time.Minute)
+	}
+	limiter.mu.Unlock()
+
+	// Next allow will trigger cleanup of stale-ip
+	limiter.Allow("fresh-ip")
+
+	limiter.mu.Lock()
+	_, exists := limiter.visitors["stale-ip"]
+	limiter.mu.Unlock()
+
+	if exists {
+		t.Errorf("expected stale-ip visitor to be cleaned up")
+	}
+}

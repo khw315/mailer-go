@@ -28,3 +28,4 @@ spool/
 *.swp
 benchmark-report.html
 comprehensive_results.json
+coverage

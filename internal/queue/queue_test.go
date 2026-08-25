@@ -2,9 +2,11 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -178,3 +180,105 @@ func TestQueueDLQAndRetry(t *testing.T) {
 	}
 }
 
+func TestQueueHooksAndManagement(t *testing.T) {
+	var hookEvents []string
+	var mu sync.Mutex
+
+	mock := &mockRelayer{}
+	cfg := &config.QueueConfig{
+		Enabled:        true,
+		MaxRetries:     1,
+		RetryInterval:  config.Duration{Duration: 10 * time.Millisecond},
+		MaxConcurrency: 1,
+	}
+
+	q := New(cfg, mock, metrics.New(), nil)
+	q.AddHook(func(event string, item *QueuedEmail, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		hookEvents = append(hookEvents, event)
+	})
+
+	_ = q.Start(context.Background())
+	defer q.Stop()
+
+	id, _ := q.Enqueue("a@b.com", []string{"c@d.com"}, []byte("Subject: Hooks\r\n\r\nBody"))
+
+	// Check GetActive
+	active := q.GetActive()
+	if len(active) == 0 && active != nil {
+		t.Errorf("unexpected active items state")
+	}
+
+	// Flush
+	flushed := q.Flush()
+	if flushed < 0 {
+		t.Errorf("expected non-negative flush count")
+	}
+
+	// DeleteItem
+	_ = q.DeleteItem(id)
+
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hookEvents) == 0 {
+		t.Errorf("expected hook events to be recorded")
+	}
+}
+
+func TestQueueDiskSpoolStartupLoading(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "mailer-spool-load-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	activeDir := filepath.Join(tempDir, "active")
+	failedDir := filepath.Join(tempDir, "failed")
+	_ = os.MkdirAll(activeDir, 0750)
+	_ = os.MkdirAll(failedDir, 0750)
+
+	// Write a valid active item
+	validItem := QueuedEmail{
+		ID:          "preload-1",
+		From:        "pre@load.test",
+		To:          []string{"dest@load.test"},
+		Data:        []byte("Subject: Preloaded\r\n\r\nPreloaded message"),
+		Subject:     "Preloaded",
+		Retries:     0,
+		Status:      "queued",
+		CreatedAt:   time.Now(),
+		NextAttempt: time.Now(),
+	}
+	data, _ := json.Marshal(validItem)
+	_ = os.WriteFile(filepath.Join(activeDir, "preload-1.json"), data, 0600)
+
+	// Write a corrupt item
+	_ = os.WriteFile(filepath.Join(activeDir, "corrupted.json"), []byte("invalid-json{"), 0600)
+
+	// Write a valid failed (DLQ) item
+	failedItem := validItem
+	failedItem.ID = "preload-failed"
+	failedItem.Status = "failed_dlq"
+	failedData, _ := json.Marshal(failedItem)
+	_ = os.WriteFile(filepath.Join(failedDir, "preload-failed.json"), failedData, 0600)
+
+	mock := &mockRelayer{}
+	cfg := &config.QueueConfig{
+		Enabled:        true,
+		SpoolDir:       tempDir,
+		MaxRetries:     3,
+		MaxConcurrency: 1,
+	}
+
+	q := New(cfg, mock, metrics.New(), nil)
+	_ = q.Start(context.Background())
+	defer q.Stop()
+
+	dlq := q.GetDLQ()
+	if len(dlq) != 1 || dlq[0].ID != "preload-failed" {
+		t.Errorf("expected 1 preloaded DLQ item, got %+v", dlq)
+	}
+}

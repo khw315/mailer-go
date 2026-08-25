@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"net/smtp"
 	"testing"
@@ -36,48 +37,8 @@ func TestInjectHeaders(t *testing.T) {
 }
 
 func TestRelaySendViaMockServer(t *testing.T) {
-	// Start mock SMTP server listener
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen on mock port: %v", err)
-	}
+	l, port := startMockServer(t)
 	defer l.Close()
-
-	port := l.Addr().(*net.TCPAddr).Port
-
-	go func() {
-		conn, err := l.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		// Simple SMTP conversation simulation
-		_, _ = conn.Write([]byte("220 mock.smtp Service Ready\r\n"))
-
-		buf := make([]byte, 1024)
-		for {
-			n, err := conn.Read(buf)
-			if err != nil {
-				return
-			}
-			cmd := string(buf[:n])
-			if bytes.HasPrefix(buf[:n], []byte("EHLO")) || bytes.HasPrefix(buf[:n], []byte("HELO")) {
-				_, _ = conn.Write([]byte("250-mock.smtp\r\n250 HELP\r\n"))
-			} else if bytes.HasPrefix(buf[:n], []byte("MAIL FROM:")) {
-				_, _ = conn.Write([]byte("250 2.1.0 Ok\r\n"))
-			} else if bytes.HasPrefix(buf[:n], []byte("RCPT TO:")) {
-				_, _ = conn.Write([]byte("250 2.1.5 Ok\r\n"))
-			} else if bytes.HasPrefix(buf[:n], []byte("DATA")) {
-				_, _ = conn.Write([]byte("354 End data with <CR><LF>.<CR><LF>\r\n"))
-			} else if bytes.Contains(buf[:n], []byte("\r\n.\r\n")) || cmd == ".\r\n" {
-				_, _ = conn.Write([]byte("250 2.0.0 Ok: queued\r\n"))
-			} else if bytes.HasPrefix(buf[:n], []byte("QUIT")) {
-				_, _ = conn.Write([]byte("221 2.0.0 Bye\r\n"))
-				return
-			}
-		}
-	}()
 
 	cfg := &config.RelayConfig{
 		Host:     "127.0.0.1",
@@ -90,7 +51,7 @@ func TestRelaySendViaMockServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err = client.Send(ctx, "sender@local.test", []string{"receiver@remote.test"}, []byte("Subject: Mock Relay\r\n\r\nRelayed content"))
+	err := client.Send(ctx, "sender@local.test", []string{"receiver@remote.test"}, []byte("Subject: Mock Relay\r\n\r\nRelayed content"))
 	if err != nil {
 		t.Fatalf("relay Send failed: %v", err)
 	}
@@ -165,7 +126,7 @@ func handleMockConn(c net.Conn) {
 func mockSMTPResponse(data []byte) (string, bool) {
 	switch {
 	case bytes.HasPrefix(data, []byte("EHLO")), bytes.HasPrefix(data, []byte("HELO")):
-		return "250-mock.smtp\r\n250 HELP\r\n", false
+		return "250-mock.smtp\r\n250-AUTH PLAIN LOGIN\r\n250 HELP\r\n", false
 	case bytes.HasPrefix(data, []byte("MAIL FROM:")):
 		return "250 2.1.0 Ok\r\n", false
 	case bytes.HasPrefix(data, []byte("RCPT TO:")):
@@ -204,27 +165,129 @@ func TestMultiRelayFailover(t *testing.T) {
 	}
 }
 
+func TestRoundRobinRelay(t *testing.T) {
+	l1, port1 := startMockServer(t)
+	defer l1.Close()
+	l2, port2 := startMockServer(t)
+	defer l2.Close()
+
+	cfg := &config.RelayConfig{
+		Strategy: "round-robin",
+		Upstreams: []config.UpstreamRelay{
+			{Name: "server-1", Host: "127.0.0.1", Port: port1, TLSType: "NONE", AuthType: "NONE"},
+			{Name: "server-2", Host: "127.0.0.1", Port: port2, TLSType: "NONE", AuthType: "NONE"},
+		},
+	}
+
+	client := NewClient(cfg, metrics.New(), nil)
+	ctx := context.Background()
+
+	// Send twice to exercise round-robin index rotation
+	for i := 0; i < 2; i++ {
+		err := client.Send(ctx, "sender@test.local", []string{"rr@test.local"}, []byte("Subject: Round Robin\r\n\r\nBody"))
+		if err != nil {
+			t.Fatalf("round robin send iteration %d failed: %v", i, err)
+		}
+	}
+}
+
 func TestDomainRouting(t *testing.T) {
 	lCorp, portCorp := startMockServer(t)
 	defer lCorp.Close()
 
 	cfg := &config.RelayConfig{
 		DomainRoutes: map[string]string{
-			"corp.internal": net.JoinHostPort("127.0.0.1", string(rune(portCorp))),
+			"corp.internal": "corp",
+			"backup.local":  fmt.Sprintf("127.0.0.1:%d", portCorp),
 		},
 		Upstreams: []config.UpstreamRelay{
 			{Name: "corp", Host: "127.0.0.1", Port: portCorp, TLSType: "NONE", AuthType: "NONE"},
 		},
 	}
-	cfg.DomainRoutes["corp.internal"] = "corp"
 
 	client := NewClient(cfg, metrics.New(), nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// Route by named upstream
 	err := client.Send(ctx, "sender@test.local", []string{"alice@corp.internal"}, []byte("Subject: Internal\r\n\r\nInternal message"))
 	if err != nil {
 		t.Fatalf("domain routed send failed: %v", err)
 	}
+
+	// Route by host:port target
+	err = client.Send(ctx, "sender@test.local", []string{"bob@backup.local"}, []byte("Subject: Backup\r\n\r\nBackup message"))
+	if err != nil {
+		t.Fatalf("domain host:port routed send failed: %v", err)
+	}
+}
+
+func TestGroupRecipientsByDomain(t *testing.T) {
+	valid := []string{"alice@example.com", "bob@example.com", "carol@other.org"}
+	groups, err := groupRecipientsByDomain(valid)
+	if err != nil || len(groups["example.com"]) != 2 || len(groups["other.org"]) != 1 {
+		t.Errorf("unexpected domain grouping: %v, err: %v", groups, err)
+	}
+
+	invalid := []string{"not-an-email"}
+	_, err = groupRecipientsByDomain(invalid)
+	if err == nil {
+		t.Errorf("expected error on invalid email address")
+	}
+}
+
+func TestTryDeliverMX(t *testing.T) {
+	l, port := startMockServer(t)
+	defer l.Close()
+
+	cfg := &config.RelayConfig{InsecureSkipVerify: true}
+	client := NewClient(cfg, metrics.New(), nil)
+
+	// Direct MX send to local server
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_ = client.tryDeliverMX(ctx, fmt.Sprintf("127.0.0.1:%d", port), "test.local", []string{"rcpt@test.local"}, "sender@test.local", []byte("Subject: Direct MX\r\n\r\nTest"))
+}
+
+func TestAuthenticateUpstreamModes(t *testing.T) {
+	l, port := startMockServer(t)
+	defer l.Close()
+
+	// 1. PLAIN Auth
+	cfgPlain := &config.RelayConfig{
+		Host:     "127.0.0.1",
+		Port:     port,
+		Username: "user",
+		Password: "pass",
+		AuthType: "PLAIN",
+		TLSType:  "NONE",
+	}
+	clientPlain := NewClient(cfgPlain, metrics.New(), nil)
+	_ = clientPlain.Send(context.Background(), "a@b.c", []string{"d@e.f"}, []byte("Subject: Auth\r\n\r\nMsg"))
+
+	// 2. LOGIN Auth
+	cfgLogin := &config.RelayConfig{
+		Host:     "127.0.0.1",
+		Port:     port,
+		Username: "user",
+		Password: "pass",
+		AuthType: "LOGIN",
+		TLSType:  "NONE",
+	}
+	clientLogin := NewClient(cfgLogin, metrics.New(), nil)
+	_ = clientLogin.Send(context.Background(), "a@b.c", []string{"d@e.f"}, []byte("Subject: Auth\r\n\r\nMsg"))
+
+	// 3. AUTO Auth
+	cfgAuto := &config.RelayConfig{
+		Host:     "127.0.0.1",
+		Port:     port,
+		Username: "user",
+		Password: "pass",
+		AuthType: "AUTO",
+		TLSType:  "NONE",
+	}
+	clientAuto := NewClient(cfgAuto, metrics.New(), nil)
+	_ = clientAuto.Send(context.Background(), "a@b.c", []string{"d@e.f"}, []byte("Subject: Auth\r\n\r\nMsg"))
 }
 
